@@ -8,16 +8,16 @@ Method of synchronization: state-based
 ---
 
 Goals:
-    Consistency
-    Availability
-    Partition tolerance
+   - Consistency
+   - Availability
+   - Partition tolerance
 
 Functions:
-    Authentication & Authorization
-    File Upload & Download
-    Synchronization 
-    Conflict (update collision) Resolution
-    Logging & Monitoring
+   - Authentication & Authorization
+   - File Upload & Download
+   - Synchronization 
+   - Conflict (update collision) Resolution
+   - Logging & Monitoring
 
 ---
 
