@@ -5,16 +5,12 @@ Architecture: client-server
 
 Method of synchronization: state-based 
 
+---
+
 Goals:
     Consistency
     Availability
     Partition tolerance
-
-
-Mechanism:
-    Data sharing by:
-    Network protocol: 
-
 
 Functions:
     Authentication & Authorization
@@ -22,6 +18,8 @@ Functions:
     Synchronization 
     Conflict (update collision) Resolution
     Logging & Monitoring
+
+---
 
 Programming language: Python
 
@@ -34,6 +32,8 @@ Network protocol:
     - HTTPS for REST API
     - WSS (WebSocket Secure) for real-time updates
     - TCP/IP for underlying transport
+
+---
 
 Technical Implementation:
 
@@ -80,8 +80,11 @@ Technical Implementation:
     - Grafana dashboards for visualization
     - Error tracking and alerting
 
+---
 
 Project Stucture:
+
+```plaintext
 project/
 ├── server/
 │   ├── main.py
