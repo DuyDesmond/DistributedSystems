@@ -53,6 +53,7 @@ Technical Implementation:
     - WebSocket client for real-time updates
 
 3. Synchronization Process:
+   
     a. File Changes Detection:
         - Monitor file system events (create, modify, delete)
         - Calculate file checksums (SHA-256)
@@ -68,13 +69,13 @@ Technical Implementation:
         - Keep conflict copies for manual resolution
         - Maintain version history
 
-4. Security Measures:
+5. Security Measures:
     - End-to-end encryption for file content
     - TLS for all network communications
     - Rate limiting and request validation
     - Access control lists (ACL)
 
-5. Monitoring & Logging:
+6. Monitoring & Logging:
     - Structured logging with ELK stack
     - Prometheus metrics for system health
     - Grafana dashboards for visualization
