@@ -55,16 +55,19 @@ Technical Implementation:
 3. Synchronization Process:
    
     a. File Changes Detection:
+   
         - Monitor file system events (create, modify, delete)
         - Calculate file checksums (SHA-256)
         - Maintain version vectors for conflict detection
     
     b. Data Transfer:
+   
         - Chunk files > 10MB
         - Compress data when beneficial
         - Implement resume-able uploads/downloads
     
     c. Conflict Resolution:
+   
         - Use Last-Write-Wins (LWW) as default strategy
         - Keep conflict copies for manual resolution
         - Maintain version history
