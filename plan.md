@@ -1,22 +1,22 @@
-
+File synchroniser (like DropBox)
 
 Architecture: client-server
 
-Method of synchronization: state-based 
+Method of synchronization: hybrid (state-based + event-driven)
 
-Goals:
-    Consistency
-    Availability
-    Partition tolerance
-
-
-Mechanism:
-    Data sharing by:
-    Network protocol: 
-
+Goals (CAP Theorem Priority):
+    Primary: Availability + Partition tolerance
+    Secondary: Eventual Consistency
+    Trade-off: Strong consistency sacrificed for better availability during network partitions
+    
+System Qualities:
+    - High scalability (support millions of users)
+    - Fault tolerance (graceful degradation)
+    - Low latency file operations
+    - Cross-platform compatibility
 
 Functions:
-    Authentication & Authorization
+    Authentication 
     File Upload & Download
     Synchronization 
     Conflict (update collision) Resolution
@@ -38,12 +38,12 @@ Technical Implementation:
 
 1. Server Components:
     - FastAPI framework for REST endpoints
-    - PostgreSQL database for metadata storage
+    - Single PostgreSQL database with separate schemas for metadata and user accounts
     - Redis for caching and real-time event management
-    - Store file locally and metadata in the database
-    - JWT (JSON web token) for authentication
-
-    - (Possible service) S3-compatible object storage for file content (large scale only)
+    - Local file system storage with organized directory structure
+    - Message queue (RabbitMQ) for async processing and job scheduling
+    - Load balancer (Nginx/HAProxy) for horizontal scaling
+    - Docker containers for microservice deployment
 
 2. Client Components:
     - Watchdog for local file system monitoring
@@ -54,245 +54,214 @@ Technical Implementation:
 3. Synchronization Process:
     a. File Changes Detection:
         - Monitor file system events (create, modify, delete)
-        - Calculate file checksums (SHA-256)
-        - Maintain version vectors for conflict detection
+        - Calculate file checksums (SHA-256) + file size for quick comparison
+        - Use timestamps with client IDs for version tracking
+        - Implement heartbeat mechanism for client liveness
     
     b. Data Transfer:
-        - Chunk files > 10MB
-        - Compress data when beneficial
+        - Chunk files > 5MB (smaller threshold for better UX)
+        - Use content-based deduplication
+        - Implement delta sync for modified files
+        - Compress data when beneficial (configurable)
         - Implement resume-able uploads/downloads
-    
+        - Add bandwidth throttling controls
+
     c. Conflict Resolution:
-        - Use Last-Write-Wins (LWW) as default strategy
-        - Keep conflict copies for manual resolution
-        - Maintain version history
+        - Detect conflicts using timestamp + client ID comparison
+        - Give the user 3 options: Automatic, Manual, or Smart merge
+        - Automatic uses Last-Write-Wins (LWW) with user notification
+        - Smart merge attempts automatic resolution for non-overlapping changes
+        - Keep conflict copies with clear naming convention
+        - Maintain version history with configurable retention period
 
 4. Security Measures:
-    - End-to-end encryption for file content
-    - TLS for all network communications
+    - End-to-end encryption for file content (AES-256)
+    - Client-side encryption keys derived from user password
+    - TLS 1.3 for all network communications
+    - JWT tokens for authentication with refresh mechanism
     - Rate limiting and request validation
-    - Access control lists (ACL)
+    - Access control lists (ACL) with role-based permissions
+    - Audit logging for security events
+    - File integrity verification using digital signatures
 
-5. Monitoring & Logging:
+5. Performance & Scalability:
+    - Implement connection pooling
+    - Use CDN for file distribution
+    - Add caching layers (Redis, browser cache)
+    - Database indexing strategy for metadata queries
+    - Horizontal scaling with consistent hashing
+    - Background sync prioritization (recent files first)
+
+6. Error Handling & Recovery:
+    - Exponential backoff for failed operations
+    - Circuit breaker pattern for external dependencies
+    - Graceful degradation during partial outages
+    - Automatic retry mechanisms with jitter
+    - Client-side offline mode with sync queue
+
+6.1. Local File Storage Strategy:
+    - Organized directory structure: `/storage/{user_id}/{year}/{month}/{file_id}`
+    - File deduplication using content-addressed storage (hash-based naming)
+    - Regular cleanup of orphaned files and old versions
+    - Disk space monitoring and alerts
+    - Automated backup strategy for file storage
+    - File system permissions and access control
+    - Storage quota enforcement per user
+    - Distributed storage across multiple server nodes for redundancy
+
+7. Data Models:
+    
+    Users Table:
+    - user_id (Primary Key)
+    - username, email, password_hash
+    - created_at, last_login
+    - storage_quota, used_storage
+    - account_status (active/suspended)
+    
+    Files Table:
+    - file_id (Primary Key)
+    - user_id (Foreign Key)
+    - file_path, file_name
+    - file_size, checksum (SHA-256)
+    - version_number, created_at, modified_at
+    - sync_status, conflict_status
+    
+    File_Versions Table:
+    - version_id (Primary Key)
+    - file_id (Foreign Key)
+    - version_number, checksum
+    - storage_path, created_at
+    - is_current_version
+    
+    Sync_Events Table:
+    - event_id (Primary Key)
+    - user_id, file_id
+    - event_type (create/modify/delete)
+    - timestamp, client_id
+    - sync_status (pending/completed/failed)
+
+8. API Endpoints:
+    
+    Authentication:
+    - POST /auth/login
+    - POST /auth/logout
+    - POST /auth/refresh
+    - POST /auth/register
+    
+    File Operations:
+    - GET /files/ (list user files)
+    - POST /files/upload
+    - GET /files/{file_id}/download
+    - PUT /files/{file_id}
+    - DELETE /files/{file_id}
+    - GET /files/{file_id}/versions
+    
+    Synchronization:
+    - GET /sync/changes (get pending changes)
+    - POST /sync/heartbeat
+    - WebSocket /ws/sync (real-time updates)
+
+9. Deployment Strategy:
+    - Containerized microservices with Docker
+    - Kubernetes orchestration for production
+    - CI/CD pipeline with automated testing
+    - Blue-green deployment for zero downtime
+    - Infrastructure as Code (Terraform)
+    - Multi-region deployment for global availability
+    
+10. Monitoring & Observability:
     - Structured logging with ELK stack
-    - Prometheus metrics for system health
+    - Prometheus metrics collection
     - Grafana dashboards for visualization
-    - Error tracking and alerting
+    - Distributed tracing with Jaeger
+    - Health checks and service discovery
+    - Error tracking with Sentry
+    - Performance monitoring (APM)
 
+11. Testing Strategy:
+    - Unit tests (pytest) - 80% coverage minimum
+    - Integration tests for API endpoints
+    - End-to-end tests for sync workflows
+    - Load testing with realistic file sizes
+    - Chaos engineering for failure scenarios
+    - Security testing (OWASP guidelines)
+    - Cross-platform client testing
 
-Project Stucture:
-project/
-├── server/
-│   ├── main.py
-│   ├── api/
-│   │   ├── __init__.py
-│   │   ├── routes.py
-│   │   └── websocket.py
-│   ├── core/
-│   │   ├── __init__.py
-│   │   ├── auth.py
-│   │   ├── file_manager.py
-│   │   └── sync_manager.py
-│   ├── models/
-│   │   ├── __init__.py
-│   │   ├── file.py
-│   │   └── user.py
-│   └── utils/
-│       ├── __init__.py
-│       └── encryption.py
-├── client/
-│   ├── main.py
-│   ├── core/
-│   │   ├── __init__.py
-│   │   ├── watcher.py
-│   │   └── sync_manager.py
-│   ├── storage/
-│   │   ├── __init__.py
-│   │   └── local_db.py
-│   └── utils/
-│       ├── __init__.py
-│       └── encryption.py
-└── common/
-    ├── __init__.py
-    ├── models.py
-    └── constants.py
+12. Implementation Details:
 
+    a. File Storage Implementation:
+    - Directory structure: /storage/content/{hash[0:2]}/{hash[2:4]}/{full_hash}
+    - Metadata storage: /storage/metadata/{user_id}/{file_path}.json
+    - Chunk storage for large files: /storage/chunks/{chunk_hash}
+    - Temporary upload directory: /storage/temp/{upload_id}/
+    
+    b. Synchronization Algorithm:
+    - Use Merkle trees for efficient directory comparison
+    - Implement vector clocks for conflict detection
+    - Batch operations for better performance
+    - Priority queue for sync operations (user files > shared files > old files)
+    
+    c. Database Schema Details:
+    ```sql
+    -- Users table with indexes
+    CREATE INDEX idx_users_email ON users(email);
+    CREATE INDEX idx_users_username ON users(username);
+    
+    -- Files table with composite indexes
+    CREATE INDEX idx_files_user_path ON files(user_id, file_path);
+    CREATE INDEX idx_files_checksum ON files(checksum);
+    CREATE INDEX idx_files_modified ON files(modified_at);
+    
+    -- Sync events with time-based partitioning
+    CREATE INDEX idx_sync_events_user_time ON sync_events(user_id, timestamp);
+    ```
+    
+    d. Configuration Management:
+    - Environment-specific configs (dev/staging/prod)
+    - Feature flags for gradual rollouts
+    - Rate limiting configurations
+    - Storage quotas and limits
+    - Encryption key management
+    
+    e. Error Codes and Messages:
+    - Standardized error response format
+    - Client-side error handling mapping
+    - Localization support for error messages
+    - Retry strategies for different error types
 
-Project Timeline:
-1. 19/06: Basic server setup and authentication ✅ COMPLETED
-2. 20-22/06: File operations and storage integration ✅ COMPLETED
-3. 20-22/06: Client development and file system monitoring ✅ COMPLETED
-4. 23-26/06: Synchronization logic and conflict resolution ✅ COMPLETED
-5. 27-28/06: Security implementation and testing ✅ COMPLETED
-6. 29-30/06: Monitoring, logging, and performance optimization ✅ COMPLETED
+13. Development Environment Setup:
+    - Docker Compose for local development
+    - Database migration scripts
+    - Seed data for testing
+    - Development proxy configuration
+    - Hot reload setup for client development
+    - Mock services for external dependencies
 
-Technical Procedures:
+14. Production Considerations:
+    - SSL certificate management
+    - Domain and DNS configuration
+    - Firewall and security group rules
+    - Log rotation and archival policies
+    - Database backup and restore procedures
+    - Disaster recovery runbooks
+    - Capacity planning and scaling triggers
+    - Performance benchmarks and SLAs
 
-## Phase 1: Environment Setup (Day 1)
-1. **Install Dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+15. Client Implementation Specifics:
+    - File system watcher configuration per OS
+    - Local database schema (SQLite)
+    - Sync state machine implementation
+    - Conflict resolution UI mockups
+    - Offline mode data structures
+    - Client configuration and settings storage
+    - Auto-update mechanism for client software
 
-2. **Database Setup**
-   ```bash
-   # Install PostgreSQL
-   # Create database: createdb filesync
-   python setup.py
-   ```
+16. Security Implementation Details:
+    - Key derivation functions (PBKDF2/Argon2)
+    - Encryption key rotation procedures
+    - Session management and timeout policies
+    - API rate limiting rules (requests per minute/hour)
+    - Input validation schemas
+    - CORS policy configuration
+    - Content Security Policy headers
 
-3. **Configuration**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your settings
-   ```
-
-## Phase 2: Server Implementation (Day 1-2)
-1. **Core Server Components** ✅
-   - FastAPI application with CORS middleware
-   - PostgreSQL database models (User, File)
-   - JWT authentication system
-   - File storage management
-   - WebSocket real-time communication
-
-2. **API Endpoints** ✅
-   - Authentication: `/auth/login`, `/auth/register`
-   - File operations: `/files/upload`, `/files/download`, `/files/list`
-   - Synchronization: `/sync/event`, `/sync/changes`
-
-3. **Security Implementation** ✅
-   - Password hashing with bcrypt
-   - JWT token generation and validation
-   - File encryption using Fernet (AES)
-   - HTTPS ready configuration
-
-## Phase 3: Client Implementation (Day 2-3)
-1. **File System Monitoring** ✅
-   - Watchdog integration for real-time file detection
-   - SHA-256 checksum calculation
-   - Local SQLite database for metadata
-
-2. **Synchronization Logic** ✅
-   - WebSocket client for real-time updates
-   - HTTP client for file operations
-   - Conflict detection and resolution
-   - Background sync processes
-
-3. **Client-Server Communication** ✅
-   - Authentication with server
-   - File upload/download with chunking
-   - Event propagation and handling
-
-## Phase 4: Advanced Features (Day 3-4)
-1. **Conflict Resolution** ✅
-   - Version vector implementation
-   - Last-Write-Wins (LWW) strategy
-   - Conflict detection algorithms
-   - History maintenance
-
-2. **Performance Optimization** ✅
-   - File chunking for large files (>10MB)
-   - Resume-able uploads/downloads
-   - Efficient delta synchronization
-   - Connection pooling
-
-## Phase 5: Testing & Deployment (Day 4-5)
-1. **System Testing** ✅
-   - Automated test suite (`test_system.py`)
-   - Multi-client synchronization testing
-   - Network failure simulation
-   - Performance benchmarking
-
-2. **Production Readiness** ✅
-   - Environment configuration templates
-   - Setup automation scripts
-   - Documentation and user guides
-   - Error handling and logging
-
-## Technical Architecture Details:
-
-### Data Flow:
-1. **Client Side**: Watchdog → Local DB → HTTP/WebSocket → Server
-2. **Server Side**: API → Database → File Storage → WebSocket Broadcast
-3. **Sync Process**: Event Detection → Conflict Check → Resolution → Propagation
-
-### Security Model:
-- **Authentication**: JWT tokens (30min expiry)
-- **Encryption**: End-to-end file encryption (Fernet/AES)
-- **Transport**: TLS/HTTPS for all communications
-- **Access Control**: User-based file ownership
-
-### Conflict Resolution Algorithm:
-```python
-def resolve_conflict(existing_file, new_event):
-    if new_event.timestamp > existing_file.modified_at:
-        # New version wins (LWW)
-        update_file(new_event)
-        return "new_version_wins"
-    else:
-        # Keep existing version
-        return "existing_version_wins"
-```
-
-### Performance Characteristics:
-- **File Chunking**: 10MB chunks for efficient transfer
-- **Sync Interval**: 30 seconds default (configurable)
-- **Concurrent Connections**: Unlimited (server capacity dependent)
-- **Storage**: Local file system + PostgreSQL metadata
-
-## Deployment Instructions:
-
-### Server Deployment:
-```bash
-# 1. Install dependencies
-pip install -r requirements.txt
-
-# 2. Setup database
-python setup.py
-
-# 3. Start server
-python server/main.py
-```
-
-### Client Deployment:
-```bash
-# Start client with watch directory
-python client/main.py \
-  --watch-dir /path/to/sync \
-  --server-url http://server:8000 \
-  --username user \
-  --password pass
-```
-
-### Production Considerations:
-- Use environment variables for sensitive configuration
-- Deploy server behind reverse proxy (nginx)
-- Use managed PostgreSQL service for scalability
-- Implement monitoring and alerting
-- Regular database backups
-- SSL/TLS certificates for HTTPS
-
-## Verification Procedures:
-
-### 1. System Health Check:
-```bash
-curl http://localhost:8000/health
-```
-
-### 2. Authentication Test:
-```bash
-python test_system.py
-```
-
-### 3. Multi-Client Sync Test:
-1. Start server
-2. Start 2+ clients with different directories
-3. Create files in one directory
-4. Verify propagation to other directories
-5. Test conflict scenarios
-
-### 4. Performance Test:
-- Upload files of various sizes (1KB to 100MB)
-- Measure transfer times and resource usage
-- Test with multiple concurrent clients
-- Monitor database performance
