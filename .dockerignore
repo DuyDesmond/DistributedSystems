@@ -1,0 +1,36 @@
+# Ignore version control
+.git
+.gitignore
+
+# Ignore Maven build artifacts
+target/
+!target/server-1.0.0.jar
+!target/client-1.0.0.jar
+!target/common-1.0.0.jar
+
+# Ignore IDE files
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore temporary files
+*.tmp
+*.temp
+*.log
+
+# Ignore documentation
+*.md
+*.txt
+*.png
+
+# Ignore Docker files in subdirectories
+*/Dockerfile
+
+# Ignore batch files
+*.bat
