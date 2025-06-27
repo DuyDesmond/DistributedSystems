@@ -13,16 +13,15 @@ System Qualities:
     - High scalability (support millions of users)
     - Fault tolerance (graceful degradation)
     - Low latency file operations
-    - Cross-platform compatibility
 
 Functions:
     Authentication 
-    File Upload & Download
+    File Upload & Download & Update & Revert
     Synchronization 
     Conflict (update collision) Resolution
     Logging & Monitoring
 
-Programming language: Python
+Programming language: Python 3.13.5
 
 Data sharing by:
     - REST API for client-server communication
@@ -42,7 +41,7 @@ Technical Implementation:
     - Redis for caching and real-time event management
     - Local file system storage with organized directory structure
     - Message queue (RabbitMQ) for async processing and job scheduling
-    - Load balancer (Nginx/HAProxy) for horizontal scaling
+    - Load balancer (Nginx) for horizontal scaling
     - Docker containers for microservice deployment
 
 2. Client Components:
@@ -68,10 +67,9 @@ Technical Implementation:
 
     c. Conflict Resolution:
         - Detect conflicts using timestamp + client ID comparison
-        - Give the user 3 options: Automatic, Manual, or Smart merge
+        - Give the user 2 options: Automatic, Manual
         - Automatic uses Last-Write-Wins (LWW) with user notification
-        - Smart merge attempts automatic resolution for non-overlapping changes
-        - Keep conflict copies with clear naming convention
+        - Keep conflict copies with clear naming convention for manual conflic resolution
         - Maintain version history with configurable retention period
 
 4. Security Measures:
@@ -82,12 +80,11 @@ Technical Implementation:
     - Rate limiting and request validation
     - Access control lists (ACL) with role-based permissions
     - Audit logging for security events
-    - File integrity verification using digital signatures
 
 5. Performance & Scalability:
     - Implement connection pooling
     - Use CDN for file distribution
-    - Add caching layers (Redis, browser cache)
+    - Add caching layers (Redis)
     - Database indexing strategy for metadata queries
     - Horizontal scaling with consistent hashing
     - Background sync prioritization (recent files first)
@@ -107,7 +104,6 @@ Technical Implementation:
     - Automated backup strategy for file storage
     - File system permissions and access control
     - Storage quota enforcement per user
-    - Distributed storage across multiple server nodes for redundancy
 
 7. Data Models:
     
@@ -170,13 +166,9 @@ Technical Implementation:
     - Multi-region deployment for global availability
     
 10. Monitoring & Observability:
-    - Structured logging with ELK stack
     - Prometheus metrics collection
-    - Grafana dashboards for visualization
-    - Distributed tracing with Jaeger
     - Health checks and service discovery
-    - Error tracking with Sentry
-    - Performance monitoring (APM)
+    - Error tracking 
 
 11. Testing Strategy:
     - Unit tests (pytest) - 80% coverage minimum
@@ -185,7 +177,6 @@ Technical Implementation:
     - Load testing with realistic file sizes
     - Chaos engineering for failure scenarios
     - Security testing (OWASP guidelines)
-    - Cross-platform client testing
 
 12. Implementation Details:
 
@@ -231,34 +222,20 @@ Technical Implementation:
 
 13. Development Environment Setup:
     - Docker Compose for local development
-    - Database migration scripts
     - Seed data for testing
     - Development proxy configuration
     - Hot reload setup for client development
-    - Mock services for external dependencies
 
-14. Production Considerations:
-    - SSL certificate management
-    - Domain and DNS configuration
-    - Firewall and security group rules
-    - Log rotation and archival policies
-    - Database backup and restore procedures
-    - Disaster recovery runbooks
-    - Capacity planning and scaling triggers
-    - Performance benchmarks and SLAs
-
-15. Client Implementation Specifics:
+14. Client Implementation Specifics:
     - File system watcher configuration per OS
     - Local database schema (SQLite)
     - Sync state machine implementation
-    - Conflict resolution UI mockups
+    - UI for conflict resolution
     - Offline mode data structures
-    - Client configuration and settings storage
-    - Auto-update mechanism for client software
+
 
 16. Security Implementation Details:
     - Key derivation functions (PBKDF2/Argon2)
-    - Encryption key rotation procedures
     - Session management and timeout policies
     - API rate limiting rules (requests per minute/hour)
     - Input validation schemas

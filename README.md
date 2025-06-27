@@ -1,255 +1,279 @@
 # Distributed File Synchronization System
 
-A robust client-server file synchronization system built with Python, featuring real-time updates, conflict resolution, and secure file transfer.
+A **desktop file synchronization system** (like Dropbox) built with Python, providing both CLI and GUI interfaces for managing file synchronization. This is a native desktop application with visual monitoring and command-line control - not a web application.
 
 ## Architecture
 
-- **Architecture**: Client-Server
-- **Synchronization Method**: State-based
-- **Programming Language**: Python 3.11+
-- **Database**: PostgreSQL (server), SQLite (client)
-- **Communication**: REST API + WebSockets
+The system follows a client-server architecture with:
+
+- **Server**: FastAPI-based REST API with WebSocket support for real-time updates
+- **Desktop Client**: Python client with file system monitoring and sync capabilities
+- **CLI Interface**: Command-line tool for file and user management
+- **Desktop GUI**: Tkinter-based desktop interface for visual monitoring and control
+- **Database**: PostgreSQL for metadata storage
+- **Cache**: Redis for session management and real-time updates
+- **Message Queue**: RabbitMQ for asynchronous processing
 
 ## Features
 
-### Core Functionality
-- ✅ **Authentication & Authorization** - JWT-based user authentication
-- ✅ **File Upload & Download** - Secure file transfer with chunking for large files
-- ✅ **Real-time Synchronization** - WebSocket-based real-time updates
-- ✅ **Conflict Resolution** - Last-Write-Wins (LWW) strategy with version vectors
-- ✅ **File System Monitoring** - Automatic detection of local file changes
-- ✅ **End-to-end Encryption** - File content encryption for security
+- **Desktop Application**: Native desktop GUI and CLI interfaces (not a web app)
+- Real-time file synchronization with visual status monitoring
+- Conflict resolution (Last-Write-Wins with user notification)
+- File versioning and history tracking
+- Chunked file transfer for large files
+- Content-based deduplication
+- End-to-end encryption support
+- WebSocket for real-time updates
+- JWT-based authentication
+- Audit logging for security
+- Cross-platform support (Windows, Linux, macOS)
 
-### Security Features
-- JWT token-based authentication
-- End-to-end file encryption
-- TLS/HTTPS for all communications
-- Access control lists (ACL)
-- Rate limiting and request validation
+## Quick Start
 
-### CAP Theorem Considerations
-- **Consistency**: Ensured through version vectors and conflict resolution
-- **Availability**: Server remains available during network partitions
-- **Partition Tolerance**: Clients can work offline and sync when reconnected
+### Using Docker Compose (Recommended)
 
-## Project Structure
-
-```
-project/
-├── server/                 # Server-side components
-│   ├── main.py            # FastAPI server entry point
-│   ├── api/               # API endpoints
-│   ├── core/              # Core business logic
-│   ├── models/            # Database models
-│   └── utils/             # Utilities and encryption
-├── client/                # Client-side components
-│   ├── main.py            # Client entry point
-│   ├── core/              # Client core logic
-│   ├── storage/           # Local SQLite database
-│   └── utils/             # Client utilities
-├── common/                # Shared components
-│   ├── models.py          # Pydantic models
-│   └── constants.py       # Application constants
-└── requirements.txt       # Python dependencies
+1. Clone the repository:
+```bash
+git clone <repository-url>
+cd DistributedSystems
 ```
 
-## Installation & Setup
+2. Start the server services:
+```bash
+docker-compose up -d
+```
 
-### Prerequisites
-- Python 3.11 or higher
-- PostgreSQL database
-- Redis server (optional, for advanced features)
+3. The server will be available at `http://localhost:8000`
 
-### 1. Install Dependencies
+4. Install desktop client dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Database Setup
+5. Launch the desktop application:
 ```bash
-# Install PostgreSQL and create a database
+# Desktop GUI (recommended for most users)
+python launcher.py gui
+
+# Command Line Interface
+python launcher.py cli
+
+# Direct sync client
+python launcher.py sync
+```
+
+### Manual Setup
+
+#### Server Setup
+
+1. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+2. Set up PostgreSQL database:
+```bash
 createdb filesync
-
-# Run setup script to create tables and test user
-python setup.py
 ```
 
-### 3. Configuration
+3. Set environment variables:
 ```bash
-# Copy environment template
-cp .env.example .env
-
-# Edit .env with your configuration
-# Update database connection strings, secret keys, etc.
+export DATABASE_URL=postgresql://user:password@localhost:5432/filesync
+export REDIS_URL=redis://localhost:6379
+export RABBITMQ_URL=amqp://user:password@localhost:5672/
+export JWT_SECRET=your-secret-key
 ```
 
-### 4. Start the Server
+4. Run database migrations:
+```bash
+cd server
+python -c "from database import init_database; init_database('postgresql://user:password@localhost:5432/filesync')"
+```
+
+5. Start the server:
 ```bash
 python server/main.py
 ```
-Server will be available at `http://localhost:8000`
 
-### 5. Start a Client
+#### Desktop Client Setup
+
+1. Install client dependencies (including GUI support):
 ```bash
-python client/main.py --watch-dir /path/to/sync/folder --username testuser --password testpass123
+pip install -r requirements.txt
+
+# On Ubuntu/Debian, if tkinter is not available:
+sudo apt-get install python3-tk
 ```
 
-## Usage
-
-### Server API Endpoints
-
-#### Authentication
-- `POST /api/v1/auth/register` - Register new user
-- `POST /api/v1/auth/login` - User login
-
-#### File Operations
-- `POST /api/v1/files/upload` - Upload file
-- `GET /api/v1/files/download/{file_id}` - Download file
-- `GET /api/v1/files/list` - List user files
-
-#### Synchronization
-- `POST /api/v1/sync/event` - Process sync event
-- `GET /api/v1/sync/changes` - Get changes since timestamp
-
-### Client Usage
-
-#### Basic Synchronization
-The client automatically:
-1. Monitors the specified directory for changes
-2. Uploads new/modified files to the server
-3. Downloads updates from other clients
-4. Resolves conflicts using Last-Write-Wins strategy
-
-#### Command Line Options
+2. Launch the **desktop application** (choose one):
 ```bash
-python client/main.py \
-  --watch-dir /path/to/folder \
-  --server-url http://localhost:8000 \
-  --username your_username \
-  --password your_password
+# Start with desktop GUI (primary interface)
+python launcher.py gui
+
+# Or use command line interface  
+python launcher.py cli
+
+# Or start background sync client only
+python launcher.py sync
 ```
 
-## Technical Implementation
+### Windows Users - Quick Launch
 
-### Synchronization Process
+Use the provided PowerShell script:
+```powershell
+# Setup and launch desktop GUI
+.\run.ps1 -GUI
 
-1. **File Change Detection**
-   - Watchdog monitors local file system
-   - Calculates SHA-256 checksums
-   - Maintains version vectors for conflict detection
+# Or launch CLI
+.\run.ps1 -CLI
 
-2. **Data Transfer**
-   - Files > 10MB are chunked
-   - Resume-able uploads/downloads
-   - Data compression when beneficial
-
-3. **Conflict Resolution**
-   - Last-Write-Wins (LWW) as default
-   - Version history maintenance
-   - Conflict copies for manual resolution
-
-### Security Measures
-
-- **File Encryption**: End-to-end encryption using Fernet (AES)
-- **Network Security**: TLS for all communications
-- **Authentication**: JWT tokens with configurable expiration
-- **Access Control**: User-based file ownership
-
-### Database Schema
-
-#### Users Table
-```sql
-CREATE TABLE users (
-    id UUID PRIMARY KEY,
-    username VARCHAR(255) UNIQUE,
-    email VARCHAR(255),
-    hashed_password VARCHAR(255),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+# Or start full system with Docker
+.\run.ps1 -Docker
 ```
 
-#### Files Table
-```sql
-CREATE TABLE files (
-    id UUID PRIMARY KEY,
-    path VARCHAR(1024),
-    checksum VARCHAR(64),
-    size INTEGER,
-    owner_id UUID REFERENCES users(id),
-    version_vector JSONB,
-    modified_at TIMESTAMP,
-    is_deleted BOOLEAN DEFAULT FALSE
-);
+### Manual Usage Examples
+
+```bash
+# Start with desktop GUI
+python launcher.py gui
+
+# Or use command line interface
+python cli.py user register --username myuser --email user@example.com
+python cli.py sync start --server http://localhost:8000 --folder ./sync --username myuser
 ```
+
+## User Interfaces
+
+### Desktop GUI
+The primary interface is a cross-platform desktop application built with Tkinter:
+
+- **File Management**: Visual file browser with sync status indicators
+- **Real-time Monitoring**: Live updates of sync events and file changes
+- **Configuration**: Easy setup of server connection and sync folders
+- **Status Dashboard**: Monitor connection status, sync progress, and errors
+
+Launch with: `python launcher.py gui`
+
+### Command Line Interface (CLI)
+Full-featured CLI for automation and advanced users:
+
+- **User Management**: Register, login, manage accounts
+- **File Operations**: Add, remove, list synchronized files
+- **Sync Control**: Start, stop, monitor synchronization
+- **Configuration**: Server settings, sync folder management
+
+Launch with: `python launcher.py cli` or `python cli.py`
+
+### Direct Sync Client
+Background sync service for headless operation:
+
+- **Automatic Sync**: Continuous file monitoring and synchronization
+- **Lightweight**: Minimal resource usage for server deployments
+- **Configurable**: Command-line options for all settings
+
+Launch with: `python launcher.py sync`
+
+## API Endpoints
+
+### Authentication
+- `POST /auth/register` - Register new user
+- `POST /auth/login` - Login user
+- `POST /auth/refresh` - Refresh access token
+- `POST /auth/logout` - Logout user
+
+### File Operations
+- `GET /files/` - List user files
+- `POST /files/upload` - Upload file
+- `GET /files/{file_id}/download` - Download file
+- `DELETE /files/{file_id}` - Delete file
+- `GET /files/{file_id}/versions` - Get file versions
+
+### Synchronization
+- `GET /sync/changes` - Get pending changes
+- `POST /sync/heartbeat` - Update client heartbeat
+- `WebSocket /ws/sync/{client_id}` - Real-time updates
+
+## Configuration
+
+### Server Configuration
+
+Environment variables:
+- `DATABASE_URL` - PostgreSQL connection string
+- `REDIS_URL` - Redis connection string
+- `RABBITMQ_URL` - RabbitMQ connection string
+- `JWT_SECRET` - JWT signing secret
+- `STORAGE_PATH` - File storage directory (default: ./storage)
+
+### Client Configuration
+
+The client can be configured via command line arguments or configuration file:
+- `--server` - Server URL
+- `--folder` - Local sync folder
+- `--username` - Username for authentication
+- `--password` - Password for authentication
+
+## Database Schema
+
+### Users Table
+- User ID, username, email, password hash
+- Storage quota and usage tracking
+- Account status and timestamps
+
+### Files Table
+- File metadata (name, path, size, checksum)
+- Version tracking and sync status
+- Conflict resolution status
+
+### File Versions Table
+- Version history for each file
+- Content checksums and storage paths
+- Current version tracking
+
+### Sync Events Table
+- File system events (create, modify, delete)
+- Client identification and timestamps
+- Event processing status
+
+## Security Features
+
+- JWT-based authentication with refresh tokens
+- Session management with heartbeat tracking
+- End-to-end encryption support (AES-256)
+- TLS/HTTPS for all communications
+- Audit logging for security events
+- Rate limiting and input validation
+
+## Performance Optimizations
+
+- Content-addressed storage for deduplication
+- File chunking for large transfers
+- Compression for applicable file types
+- Database indexing for fast queries
+- Connection pooling and caching
+- Asynchronous processing with message queues
 
 ## Testing
 
-### Run System Tests
+Run tests with pytest:
 ```bash
-python test_system.py
+pytest tests/
 ```
 
-### Manual Testing
-1. Start the server
-2. Start multiple clients with different watch directories
-3. Create, modify, and delete files in watched directories
-4. Verify synchronization across all clients
+## Monitoring
 
-## Configuration Options
-
-### Environment Variables
-- `POSTGRES_URL` - PostgreSQL connection string
-- `SECRET_KEY` - JWT signing secret
-- `SERVER_HOST` - Server bind address
-- `SERVER_PORT` - Server port
-- `FILES_DIRECTORY` - Server file storage location
-- `CHUNK_SIZE` - File chunk size for large file transfers
-- `SYNC_INTERVAL` - Client sync interval in seconds
-
-### Performance Tuning
-- Adjust `CHUNK_SIZE` for network conditions
-- Modify `SYNC_INTERVAL` for sync frequency
-- Configure PostgreSQL for optimal performance
-- Use Redis for caching in high-load scenarios
-
-## Monitoring & Logging
-
-### Server Monitoring
-- Health check endpoint: `GET /health`
-- Structured logging to console
-- Performance metrics collection ready
-
-### Client Monitoring
-- Console output for sync events
-- Local SQLite database for sync state
-- Error reporting and retry mechanisms
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Authentication Failed**
-   - Verify username/password
-   - Check server is running
-   - Ensure network connectivity
-
-2. **Files Not Syncing**
-   - Check file permissions
-   - Verify watch directory path
-   - Check server logs for errors
-
-3. **Database Connection Error**
-   - Ensure PostgreSQL is running
-   - Verify connection string in .env
-   - Check database user permissions
-
-### Debug Mode
-Start components with additional logging:
-```bash
-
-# Server with debug logging
-python server/main.py --log-level debug
-
-# Client with verbose output
-python client/main.py --verbose --watch-dir /path
+Health check endpoint available at:
 ```
+GET /health
+```
+
+## License
+
+MIT License
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests
+5. Submit a pull request
