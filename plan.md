@@ -1,244 +1,308 @@
-File synchroniser (like DropBox)
+**File Synchronizer (like Dropbox)**
 
-Architecture: client-server
+**Architecture:** client-server
 
-Method of synchronization: hybrid (state-based + event-driven)
+**Method of synchronization:** hybrid (state-based + event-driven)
 
-Goals (CAP Theorem Priority):
-    Primary: Availability + Partition tolerance
-    Secondary: Eventual Consistency
-    Trade-off: Strong consistency sacrificed for better availability during network partitions
-    
-System Qualities:
-    - High scalability (support millions of users)
-    - Fault tolerance (graceful degradation)
-    - Low latency file operations
+**Goals (CAP Theorem Priority):**
 
-Functions:
-    Authentication 
-    File Upload & Download & Update & Revert
-    Synchronization 
-    Conflict (update collision) Resolution
-    Logging & Monitoring
+* Primary: Availability + Partition tolerance
+* Secondary: Eventual Consistency
+* Trade-off: Strong consistency sacrificed for better availability during network partitions
 
-Programming language: Python 3.13.5
+**System Qualities:**
 
-Data sharing by:
-    - REST API for client-server communication
-    - WebSocket for real-time updates
-    - File chunking for large file transfers
+* High scalability
+* Fault tolerance
+* Low latency file operations
 
-Network protocol: 
-    - HTTPS for REST API
-    - WSS (WebSocket Secure) for real-time updates
-    - TCP/IP for underlying transport
+**Functions:**
 
-Technical Implementation:
+* Authentication
+* File Upload, Download, Update, Roll-back
+* Synchronization
+* Conflict Detection and Resolution (using version vectors)
+* Logging & Monitoring of files and folders
 
-1. Server Components:
-    - FastAPI framework for REST endpoints
-    - Single PostgreSQL database with separate schemas for metadata and user accounts
-    - Redis for caching and real-time event management
-    - Local file system storage with organized directory structure
-    - Message queue (RabbitMQ) for async processing and job scheduling
-    - Load balancer (Nginx) for horizontal scaling
-    - Docker containers for microservice deployment
+**Programming Language:** Java
 
-2. Client Components:
-    - Watchdog for local file system monitoring
-    - SQLite for local state management
-    - Requests library for HTTP communications
-    - WebSocket client for real-time updates
+**Data Sharing by:**
 
-3. Synchronization Process:
-    a. File Changes Detection:
-        - Monitor file system events (create, modify, delete)
-        - Calculate file checksums (SHA-256) + file size for quick comparison
-        - Use timestamps with client IDs for version tracking
-        - Implement heartbeat mechanism for client liveness
-    
-    b. Data Transfer:
-        - Chunk files > 5MB (smaller threshold for better UX)
-        - Use content-based deduplication
-        - Implement delta sync for modified files
-        - Compress data when beneficial (configurable)
-        - Implement resume-able uploads/downloads
-        - Add bandwidth throttling controls
+* REST API for client-server communication
+* WebSocket for real-time updates
+* File chunking for large file transfers
 
-    c. Conflict Resolution:
-        - Detect conflicts using timestamp + client ID comparison
-        - Give the user 2 options: Automatic, Manual
-        - Automatic uses Last-Write-Wins (LWW) with user notification
-        - Keep conflict copies with clear naming convention for manual conflic resolution
-        - Maintain version history with configurable retention period
+**Network Protocol:**
 
-4. Security Measures:
-    - End-to-end encryption for file content (AES-256)
-    - Client-side encryption keys derived from user password
-    - TLS 1.3 for all network communications
-    - JWT tokens for authentication with refresh mechanism
-    - Rate limiting and request validation
-    - Access control lists (ACL) with role-based permissions
-    - Audit logging for security events
+* HTTPS for REST API
+* WSS (WebSocket Secure) for real-time updates
+* TCP/IP for underlying transport
 
-5. Performance & Scalability:
-    - Implement connection pooling
-    - Use CDN for file distribution
-    - Add caching layers (Redis)
-    - Database indexing strategy for metadata queries
-    - Horizontal scaling with consistent hashing
-    - Background sync prioritization (recent files first)
+---
 
-6. Error Handling & Recovery:
-    - Exponential backoff for failed operations
-    - Circuit breaker pattern for external dependencies
-    - Graceful degradation during partial outages
-    - Automatic retry mechanisms with jitter
-    - Client-side offline mode with sync queue
+### Technical Implementation
 
-6.1. Local File Storage Strategy:
-    - Organized directory structure: `/storage/{user_id}/{year}/{month}/{file_id}`
-    - File deduplication using content-addressed storage (hash-based naming)
-    - Regular cleanup of orphaned files and old versions
-    - Disk space monitoring and alerts
-    - Automated backup strategy for file storage
-    - File system permissions and access control
-    - Storage quota enforcement per user
+**1. Server Components:**
 
-7. Data Models:
-    
-    Users Table:
-    - user_id (Primary Key)
-    - username, email, password_hash
-    - created_at, last_login
-    - storage_quota, used_storage
-    - account_status (active/suspended)
-    
-    Files Table:
-    - file_id (Primary Key)
-    - user_id (Foreign Key)
-    - file_path, file_name
-    - file_size, checksum (SHA-256)
-    - version_number, created_at, modified_at
-    - sync_status, conflict_status
-    
-    File_Versions Table:
-    - version_id (Primary Key)
-    - file_id (Foreign Key)
-    - version_number, checksum
-    - storage_path, created_at
-    - is_current_version
-    
-    Sync_Events Table:
-    - event_id (Primary Key)
-    - user_id, file_id
-    - event_type (create/modify/delete)
-    - timestamp, client_id
-    - sync_status (pending/completed/failed)
+* Spring Boot framework for REST endpoints
+* PostgreSQL with JPA + Hibernate for metadata and user accounts (separate schemas)
+* Redis for caching and real-time event management (Jedis or Lettuce)
+* Java NIO for local file system storage
+* RabbitMQ with Spring AMQP for asynchronous jobs
+* Nginx as load balancer
+* Docker containers for microservice deployment
+* Spring WebSocket + STOMP for event delivery
+* **Server stores version vectors per file for authoritative conflict detection and merging**
 
-8. API Endpoints:
-    
-    Authentication:
-    - POST /auth/login
-    - POST /auth/logout
-    - POST /auth/refresh
-    - POST /auth/register
-    
-    File Operations:
-    - GET /files/ (list user files)
-    - POST /files/upload
-    - GET /files/{file_id}/download
-    - PUT /files/{file_id}
-    - DELETE /files/{file_id}
-    - GET /files/{file_id}/versions
-    
-    Synchronization:
-    - GET /sync/changes (get pending changes)
-    - POST /sync/heartbeat
-    - WebSocket /ws/sync (real-time updates)
+**2. Client Components:**
 
-9. Deployment Strategy:
-    - Containerized microservices with Docker
-    - Kubernetes orchestration for production
-    - CI/CD pipeline with automated testing
-    - Blue-green deployment for zero downtime
-    - Infrastructure as Code (Terraform)
-    - Multi-region deployment for global availability
-    
-10. Monitoring & Observability:
-    - Prometheus metrics collection
-    - Health checks and service discovery
-    - Error tracking 
+* `WatchService` for local file system monitoring
+* SQLite with Xerial JDBC for local state/version tracking
+* Apache HttpClient for HTTP communication
+* `java.net.http.WebSocket` or Tyrus client for real-time sync
+* **Client stores version vectors for each file locally to support offline sync and conflict detection**
 
-11. Testing Strategy:
-    - Unit tests (pytest) - 80% coverage minimum
-    - Integration tests for API endpoints
-    - End-to-end tests for sync workflows
-    - Load testing with realistic file sizes
-    - Chaos engineering for failure scenarios
-    - Security testing (OWASP guidelines)
+**3. Synchronization Process:**
 
-12. Implementation Details:
+**a. File Changes Detection:**
 
-    a. File Storage Implementation:
-    - Directory structure: /storage/content/{hash[0:2]}/{hash[2:4]}/{full_hash}
-    - Metadata storage: /storage/metadata/{user_id}/{file_path}.json
-    - Chunk storage for large files: /storage/chunks/{chunk_hash}
-    - Temporary upload directory: /storage/temp/{upload_id}/
-    
-    b. Synchronization Algorithm:
-    - Use Merkle trees for efficient directory comparison
-    - Implement vector clocks for conflict detection
-    - Batch operations for better performance
-    - Priority queue for sync operations (user files > shared files > old files)
-    
-    c. Database Schema Details:
-    ```sql
-    -- Users table with indexes
-    CREATE INDEX idx_users_email ON users(email);
-    CREATE INDEX idx_users_username ON users(username);
-    
-    -- Files table with composite indexes
-    CREATE INDEX idx_files_user_path ON files(user_id, file_path);
-    CREATE INDEX idx_files_checksum ON files(checksum);
-    CREATE INDEX idx_files_modified ON files(modified_at);
-    
-    -- Sync events with time-based partitioning
-    CREATE INDEX idx_sync_events_user_time ON sync_events(user_id, timestamp);
-    ```
-    
-    d. Configuration Management:
-    - Environment-specific configs (dev/staging/prod)
-    - Feature flags for gradual rollouts
-    - Rate limiting configurations
-    - Storage quotas and limits
-    - Encryption key management
-    
-    e. Error Codes and Messages:
-    - Standardized error response format
-    - Client-side error handling mapping
-    - Localization support for error messages
-    - Retry strategies for different error types
+* Monitor create, modify, delete, rollback using WatchService
+* Calculate SHA-256 checksum + file size
+* Maintain version vector per file (stored locally and server-side)
+* Use heartbeats to track client liveness
 
-13. Development Environment Setup:
-    - Docker Compose for local development
-    - Seed data for testing
-    - Development proxy configuration
-    - Hot reload setup for client development
+**b. Data Transfer:**
 
-14. Client Implementation Specifics:
-    - File system watcher configuration per OS
-    - Local database schema (SQLite)
-    - Sync state machine implementation
-    - UI for conflict resolution
-    - Offline mode data structures
+* Chunk files > 5MB using Java NIO
+* Deduplication using hash comparison
+* Delta sync with binary diff/partial transfer
+* Optional GZIP compression
+* Resume-able transfers via byte-range headers
+* Stream wrappers for bandwidth throttling
 
+**c. Conflict Resolution:**
 
-16. Security Implementation Details:
-    - Key derivation functions (PBKDF2/Argon2)
-    - Session management and timeout policies
-    - API rate limiting rules (requests per minute/hour)
-    - Input validation schemas
-    - CORS policy configuration
-    - Content Security Policy headers
+* Detect using version vectors (`{clientA: 3, clientB: 1}`)
+* If concurrent updates detected (v1 || v2): trigger conflict
+* Resolution:
 
+  * Automatic: Last-Write-Wins (LWW) with notification
+  * Manual: Conflict copies kept, user selects resolution
+* File version history supports manual rollback
+* **Server and client both compare version vectors during sync**
+
+---
+
+**4. Security Measures:**
+
+* AES-256 file encryption via JCE
+* Key derivation (PBKDF2 or Argon2) client-side
+* TLS 1.3 for transport
+* JWT-based authentication (with refresh)
+* Spring Security for access control
+* Rate limiting via Spring Gateway or custom filters
+* Audit logging
+
+**5. Performance & Scalability:**
+
+* HikariCP for database pooling
+* CDN for static file distribution
+* Redis for event/metadata caching
+* Indexing via JPA + native SQL
+* Consistent hashing for user partitioning
+* Priority sync for recently changed files
+
+**6. Error Handling & Recovery:**
+
+* Exponential backoff with Spring Retry
+* Circuit breakers via Resilience4j
+* Graceful degradation
+* Retry with jitter
+* Client-side offline mode with local sync queue
+
+**6.1 Local File Storage Strategy:**
+
+* Structure: `/storage/{user_id}/{year}/{month}/{file_id}`
+* Content-addressed storage with hash-based deduplication
+* Cleanup of orphans and old versions
+* Disk space monitoring and alerting
+* ACLs and quota enforcement
+* Encrypted storage with versioning
+
+---
+
+### Data Models
+
+**Users Table:**
+
+* user\_id (PK)
+* username, email, password\_hash
+* created\_at, last\_login
+* storage\_quota, used\_storage
+* account\_status
+
+**Files Table:**
+
+* file\_id (PK)
+* user\_id (FK)
+* file\_path, file\_name
+* file\_size, checksum
+* current\_version\_vector (JSONB) -- stores latest known vector clock
+* created\_at, modified\_at
+* sync\_status, conflict\_status
+
+**File\_Versions Table:**
+
+* version\_id (PK)
+* file\_id (FK)
+* version\_number, checksum
+* storage\_path
+* created\_at
+* is\_current\_version
+* version\_vector (JSONB) -- stores snapshot of vector at the time of save
+
+**Sync\_Events Table:**
+
+* event\_id (PK)
+* user\_id, file\_id
+* event\_type (create/modify/delete)
+* timestamp, client\_id
+* sync\_status
+
+**Client SQLite Table (file\_version\_vector):**
+
+```sql
+CREATE TABLE file_version_vector (
+    file_id TEXT PRIMARY KEY,
+    file_path TEXT,
+    version_vector TEXT, -- JSON string: {"clientA":3,"clientB":2}
+    last_modified TIMESTAMP
+);
+```
+
+---
+
+### API Endpoints
+
+**Authentication:**
+
+* POST /auth/login
+* POST /auth/logout
+* POST /auth/refresh
+* POST /auth/register
+
+**File Operations:**
+
+* GET /files/
+* POST /files/upload
+* GET /files/{file\_id}/download
+* PUT /files/{file\_id}
+* DELETE /files/{file\_id}
+* GET /files/{file\_id}/versions
+
+**Synchronization:**
+
+* GET /sync/changes
+* POST /sync/heartbeat
+* WebSocket /ws/sync
+
+---
+
+### Deployment Strategy
+
+* Dockerized services
+* Kubernetes orchestration
+* CI/CD pipeline (GitHub Actions or Jenkins)
+* Blue-green deployment
+* Terraform for IaC
+* Multi-region deployment for global access
+
+---
+
+### Monitoring & Observability
+
+* Prometheus + Grafana
+* Spring Boot Actuator health checks
+* Centralized logs (ELK Stack)
+* Error tracking with alerting
+
+---
+
+### Testing Strategy
+
+* Unit tests with JUnit + Mockito
+* Integration tests (Spring Boot Test)
+* End-to-end sync flow tests
+* Load testing (JMeter/Gatling)
+* Chaos testing
+* OWASP-based security testing
+
+---
+
+### Implementation Details
+
+**a. File Storage:**
+
+* `/storage/content/{hash[0:2]}/{hash[2:4]}/{full_hash}`
+* `/storage/metadata/{user_id}/{file_path}.json`
+* `/storage/chunks/{chunk_hash}`
+* `/storage/temp/{upload_id}/`
+
+**b. Sync Algorithm:**
+
+* Merkle tree-based comparison
+* Version vectors per file (stored server-side and client-side)
+* Vector comparison: `<`, `>`, `||` to detect conflicts
+* Priority queue for sync jobs
+
+**c. Schema Enhancements:**
+
+```sql
+CREATE INDEX idx_users_email ON users(email);
+CREATE INDEX idx_files_user_path ON files(user_id, file_path);
+CREATE INDEX idx_files_checksum ON files(checksum);
+CREATE INDEX idx_sync_events_user_time ON sync_events(user_id, timestamp);
+```
+
+**d. Config Management:**
+
+* Profiles per environment (dev/staging/prod)
+* Feature flags
+* Rate limit configs
+* Quotas
+* Key management
+
+**e. Error Handling:**
+
+* Unified error schema
+* Localized messages
+* Retry policies per error type
+
+---
+
+### Development Setup
+
+* Docker Compose for PostgreSQL, Redis, RabbitMQ
+* Dev proxy config
+* Seed data generation
+* Spring Boot DevTools for hot reload
+
+---
+
+### Client Specifics
+
+* `WatchService` for file change tracking
+* SQLite DB with version vector table
+* Conflict resolver UI (Swing/JavaFX)
+* Background sync thread
+* Offline support
+
+---
+
+### Security Details
+
+* Key derivation with SecretKeyFactory
+* JWT with `io.jsonwebtoken`
+* Session timeout + refresh
+* Hibernate Validator for input
+* Secure CORS + CSP headers
