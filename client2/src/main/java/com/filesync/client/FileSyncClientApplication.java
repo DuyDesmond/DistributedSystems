@@ -4,8 +4,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
 import com.filesync.client.config.ClientConfig;
+import com.filesync.client.service.DatabaseService;
+import com.filesync.client.service.EnhancedSyncService;
 import com.filesync.client.service.FileWatchService;
-import com.filesync.client.service.SyncService;
 import com.filesync.client.ui.MainController;
 
 import javafx.application.Application;
@@ -17,7 +18,8 @@ public class FileSyncClientApplication extends Application {
     
     private ScheduledExecutorService executorService;
     private FileWatchService fileWatchService;
-    private SyncService syncService;
+    private EnhancedSyncService syncService;
+    private DatabaseService databaseService;
     private ClientConfig config;
     
     @Override
@@ -27,7 +29,8 @@ public class FileSyncClientApplication extends Application {
         
         // Initialize services
         executorService = Executors.newScheduledThreadPool(4);
-        syncService = new SyncService(config, executorService);
+        databaseService = new DatabaseService("file_sync.db");
+        syncService = new EnhancedSyncService(config, databaseService, executorService);
         fileWatchService = new FileWatchService(config, syncService, executorService);
         
         // Load FXML
@@ -36,7 +39,7 @@ public class FileSyncClientApplication extends Application {
         
         // Get controller and inject dependencies
         MainController controller = loader.getController();
-        controller.initialize(syncService, fileWatchService, config);
+        controller.initializeController(syncService, fileWatchService, config);
         
         primaryStage.setTitle("File Synchronizer");
         primaryStage.setScene(scene);

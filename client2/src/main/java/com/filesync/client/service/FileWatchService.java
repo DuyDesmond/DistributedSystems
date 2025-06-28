@@ -18,13 +18,13 @@ public class FileWatchService {
     private static final Logger logger = LoggerFactory.getLogger(FileWatchService.class);
     
     private final ClientConfig config;
-    private final SyncService syncService;
+    private final EnhancedSyncService syncService;
     private final ScheduledExecutorService executorService;
     
     private WatchService watchService;
     private boolean running = false;
     
-    public FileWatchService(ClientConfig config, SyncService syncService, ScheduledExecutorService executorService) {
+    public FileWatchService(ClientConfig config, EnhancedSyncService syncService, ScheduledExecutorService executorService) {
         this.config = config;
         this.syncService = syncService;
         this.executorService = executorService;

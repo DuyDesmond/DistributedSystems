@@ -3,19 +3,21 @@ package com.filesync.client.ui;
 import java.io.File;
 
 import com.filesync.client.config.ClientConfig;
+import com.filesync.client.service.EnhancedSyncService;
 import com.filesync.client.service.FileWatchService;
-import com.filesync.client.service.SyncService;
 
 import javafx.application.Platform;
 import javafx.fxml.FXML;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonType;
 import javafx.scene.control.Label;
 import javafx.scene.control.PasswordField;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
+import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 
 /**
@@ -37,12 +39,25 @@ public class MainController {
     @FXML private Button registerButton;
     @FXML private Button logoutButton;
     @FXML private Button browseSyncPathButton;
+    @FXML private Button uploadFileButton;
     
-    private SyncService syncService;
+    private EnhancedSyncService syncService;
     private FileWatchService fileWatchService;
     private ClientConfig config;
     
-    public void initialize(SyncService syncService, FileWatchService fileWatchService, ClientConfig config) {
+    /**
+     * Standard FXML initialize method (called automatically when FXML is loaded)
+     */
+    @FXML
+    public void initialize() {
+        // This method is called automatically when the FXML is loaded
+        // Dependencies will be injected later via the custom initialize method
+    }
+    
+    /**
+     * Custom initialize method for dependency injection
+     */
+    public void initializeController(EnhancedSyncService syncService, FileWatchService fileWatchService, ClientConfig config) {
         this.syncService = syncService;
         this.fileWatchService = fileWatchService;
         this.config = config;
@@ -72,6 +87,9 @@ public class MainController {
         }
         if (browseSyncPathButton != null) {
             browseSyncPathButton.setOnAction(e -> handleBrowseSyncPath());
+        }
+        if (uploadFileButton != null) {
+            uploadFileButton.setOnAction(e -> handleUploadFile());
         }
         
         // Update log area periodically
@@ -216,6 +234,90 @@ public class MainController {
             if (fileWatchService.isRunning()) {
                 fileWatchService.stop();
                 fileWatchService.start();
+            }
+        }
+    }
+
+    @FXML
+    private void handleUploadFile() {
+        if (!syncService.isLoggedIn()) {
+            showAlert("Error", "Please log in first");
+            return;
+        }
+        
+        FileChooser fileChooser = new FileChooser();
+        fileChooser.setTitle("Select File to Upload");
+        
+        // Allow selection from anywhere - no initial directory restriction
+        Stage stage = (Stage) uploadFileButton.getScene().getWindow();
+        File selectedFile = fileChooser.showOpenDialog(stage);
+        
+        if (selectedFile != null) {
+            String syncDir = config.getLocalSyncPath();
+            String filePath = selectedFile.getAbsolutePath();
+            
+            // Check if file is already within sync directory
+            if (filePath.startsWith(syncDir)) {
+                // File is already in sync directory - use existing logic
+                uploadFileButton.setDisable(true);
+                uploadFileButton.setText("Uploading...");
+                
+                new Thread(() -> {
+                    try {
+                        syncService.queueFileForUpload(selectedFile.toPath());
+                        
+                        Platform.runLater(() -> {
+                            uploadFileButton.setDisable(false);
+                            uploadFileButton.setText("Upload File from Anywhere");
+                            appendLog("File queued for upload: " + selectedFile.getName());
+                        });
+                    } catch (Exception e) {
+                        Platform.runLater(() -> {
+                            uploadFileButton.setDisable(false);
+                            uploadFileButton.setText("Upload File from Anywhere");
+                            showAlert("Error", "Failed to queue file for upload: " + e.getMessage());
+                        });
+                    }
+                }).start();
+            } else {
+                // File is outside sync directory - offer to copy it
+                String fileName = selectedFile.getName();
+                String message = "This file is outside your sync directory.\n" +
+                               "Do you want to copy it to the sync directory and upload it?\n\n" +
+                               "File: " + fileName + "\n" +
+                               "Will be copied to: " + syncDir;
+                
+                Alert confirmAlert = new Alert(Alert.AlertType.CONFIRMATION);
+                confirmAlert.setTitle("Copy and Upload File");
+                confirmAlert.setHeaderText("File Outside Sync Directory");
+                confirmAlert.setContentText(message);
+                
+                confirmAlert.showAndWait().ifPresent(response -> {
+                    if (response == ButtonType.OK) {
+                        uploadFileButton.setDisable(true);
+                        uploadFileButton.setText("Copying & Uploading...");
+                        
+                        new Thread(() -> {
+                            try {
+                                // Use the new external file upload method
+                                syncService.uploadExternalFile(selectedFile.toPath());
+                                
+                                Platform.runLater(() -> {
+                                    uploadFileButton.setDisable(false);
+                                    uploadFileButton.setText("Upload File from Anywhere");
+                                    appendLog("File copied and queued for upload: " + fileName);
+                                    showAlert("Success", "File copied to sync directory and queued for upload!");
+                                });
+                            } catch (Exception e) {
+                                Platform.runLater(() -> {
+                                    uploadFileButton.setDisable(false);
+                                    uploadFileButton.setText("Upload File from Anywhere");
+                                    showAlert("Error", "Failed to copy and upload file: " + e.getMessage());
+                                });
+                            }
+                        }).start();
+                    }
+                });
             }
         }
     }

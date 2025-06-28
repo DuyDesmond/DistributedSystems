@@ -83,6 +83,7 @@
             <HBox alignment="CENTER_LEFT" spacing="10" style="-fx-background-color: #e0e0e0; -fx-padding: 10;">
                <Label fx:id="userLabel" text="Logged in as: User" style="-fx-font-weight: bold;" />
                <Region HBox.hgrow="ALWAYS" />
+               <Button fx:id="uploadFileButton" text="Upload File" style="-fx-min-width: 150px;" />
                <Button fx:id="logoutButton" text="Logout" />
             </HBox>
             
