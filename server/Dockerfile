@@ -4,8 +4,8 @@ FROM openjdk:17-jdk-slim
 # Set working directory
 WORKDIR /app
 
-# Install Maven
-RUN apt-get update && apt-get install -y maven && rm -rf /var/lib/apt/lists/*
+# Install Maven and curl for health checks
+RUN apt-get update && apt-get install -y maven curl && rm -rf /var/lib/apt/lists/*
 
 # Copy parent pom and common module first for better layer caching
 COPY pom.xml /app/
