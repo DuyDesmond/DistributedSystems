@@ -131,7 +131,7 @@
 
 ---
 
-### Data Models
+### Database schema
 
 **Users Table:**
 
@@ -168,6 +168,7 @@
 * event\_type (create/modify/delete)
 * timestamp, client\_id
 * sync\_status
+
 
 **Client SQLite Table (file\_version\_vector):**
 
