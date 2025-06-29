@@ -1,0 +1,57 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+scrape_configs:
+  # nginx metrics
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['nginx:80']
+    metrics_path: '/nginx_status'
+    scrape_interval: 30s
+
+  # Spring Boot Actuator metrics
+  - job_name: 'filesync-server-1'
+    static_configs:
+      - targets: ['server-1:8080']
+    metrics_path: '/api/actuator/prometheus'
+    scrape_interval: 30s
+
+  - job_name: 'filesync-server-2'
+    static_configs:
+      - targets: ['server-2:8080']
+    metrics_path: '/api/actuator/prometheus'
+    scrape_interval: 30s
+
+  - job_name: 'filesync-server-3'
+    static_configs:
+      - targets: ['server-3:8080']
+    metrics_path: '/api/actuator/prometheus'
+    scrape_interval: 30s
+
+  # PostgreSQL metrics
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres:5432']
+    scrape_interval: 30s
+
+  # Redis metrics
+  - job_name: 'redis-cluster'
+    static_configs:
+      - targets: ['redis-1:6379', 'redis-2:6379', 'redis-3:6379']
+    scrape_interval: 30s
+
+  # RabbitMQ metrics
+  - job_name: 'rabbitmq'
+    static_configs:
+      - targets: ['rabbitmq-1:15672', 'rabbitmq-2:15672']
+    scrape_interval: 30s
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

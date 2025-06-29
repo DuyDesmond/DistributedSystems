@@ -115,10 +115,8 @@
 **6. Error Handling & Recovery:**
 
 * Exponential backoff with Spring Retry
-* Circuit breakers via Resilience4j
-* Graceful degradation
-* Retry with jitter
-* Client-side offline mode with local sync queue
+* Graceful degradation with proper error responses
+* Retry with jitter for failed operations
 
 **6.1 Local File Storage Strategy:**
 

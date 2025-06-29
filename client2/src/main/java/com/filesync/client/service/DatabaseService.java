@@ -411,6 +411,50 @@ public class DatabaseService {
     }
     
     /**
+     * Update file metadata with version vector
+     */
+    public void updateFileMetadata(String filePath, String checksum, long fileSize, VersionVector versionVector) {
+        String sql = """
+            UPDATE file_version_vector 
+            SET checksum = ?, file_size = ?, version_vector = ?, sync_status = 'SYNCED'
+            WHERE file_path = ?
+            """;
+        
+        try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
+            pstmt.setString(1, checksum);
+            pstmt.setLong(2, fileSize);
+            pstmt.setString(3, versionVector.toJson());
+            pstmt.setString(4, filePath);
+            
+            int updated = pstmt.executeUpdate();
+            if (updated > 0) {
+                logger.debug("Updated file metadata for: {}", filePath);
+            }
+            
+        } catch (SQLException e) {
+            logger.error("Failed to update file metadata for: " + filePath, e);
+        }
+    }
+    
+    /**
+     * Mark file as synced
+     */
+    public void markFileSynced(String filePath) {
+        updateSyncStatus(filePath, "SYNCED");
+    }
+    
+    /**
+     * Clear deletion status for a file
+     */
+    public void clearDeletionStatus(String filePath) {
+        String currentStatus = getSyncStatus(filePath);
+        if ("DELETED".equals(currentStatus)) {
+            updateSyncStatus(filePath, "PENDING");
+            logger.debug("Cleared deletion status for: {}", filePath);
+        }
+    }
+    
+    /**
      * Sync queue item representation
      */
     public static class SyncQueueItem {
