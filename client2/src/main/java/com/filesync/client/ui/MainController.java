@@ -268,13 +268,13 @@ public class MainController {
                         
                         Platform.runLater(() -> {
                             uploadFileButton.setDisable(false);
-                            uploadFileButton.setText("Upload File from Anywhere");
+                            uploadFileButton.setText("Upload File ");
                             appendLog("File queued for upload: " + selectedFile.getName());
                         });
                     } catch (Exception e) {
                         Platform.runLater(() -> {
                             uploadFileButton.setDisable(false);
-                            uploadFileButton.setText("Upload File from Anywhere");
+                            uploadFileButton.setText("Upload File ");
                             showAlert("Error", "Failed to queue file for upload: " + e.getMessage());
                         });
                     }
@@ -304,14 +304,14 @@ public class MainController {
                                 
                                 Platform.runLater(() -> {
                                     uploadFileButton.setDisable(false);
-                                    uploadFileButton.setText("Upload File from Anywhere");
+                                    uploadFileButton.setText("Upload File ");
                                     appendLog("File copied and queued for upload: " + fileName);
                                     showAlert("Success", "File copied to sync directory and queued for upload!");
                                 });
                             } catch (Exception e) {
                                 Platform.runLater(() -> {
                                     uploadFileButton.setDisable(false);
-                                    uploadFileButton.setText("Upload File from Anywhere");
+                                    uploadFileButton.setText("Upload File ");
                                     showAlert("Error", "Failed to copy and upload file: " + e.getMessage());
                                 });
                             }

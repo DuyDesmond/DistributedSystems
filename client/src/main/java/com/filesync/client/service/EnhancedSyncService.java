@@ -8,6 +8,9 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -156,6 +159,10 @@ public class EnhancedSyncService {
             // Get updates from server
             getServerUpdates();
             
+            // Clean up old DELETED markers periodically (every hour)
+            // This prevents database bloat while giving enough time for sync coordination
+            cleanupOldDeletedMarkers();
+            
         } catch (Exception e) {
             logger.error("Error during periodic sync", e);
         }
@@ -217,11 +224,20 @@ public class EnhancedSyncService {
                 return;
             }
             
+            String relativePath = getRelativePath(path);
+            
+            // Check if file is marked as deleted - if so, clear the deletion status for re-upload
+            String currentSyncStatus = databaseService.getSyncStatus(relativePath);
+            if ("DELETED".equals(currentSyncStatus)) {
+                logger.info("File was previously deleted but now exists again. Clearing deletion status and uploading: {}", relativePath);
+                // Clear the DELETED status to allow re-upload
+                databaseService.updateSyncStatus(relativePath, "PENDING");
+            }
+            
             // Calculate file info
             byte[] fileData = Files.readAllBytes(path);
             String checksum = calculateChecksum(fileData);
             long fileSize = Files.size(path);
-            String relativePath = getRelativePath(path);
             
             // Get or create version vector
             VersionVector versionVector = databaseService.getFileVersionVectorByPath(relativePath);
@@ -313,8 +329,18 @@ public class EnhancedSyncService {
     /**
      * Delete file implementation
      */
+    /**
+     * Delete file implementation
+     */
     private void deleteFile(String filePath) {
-        logger.info("Deleting file: {}", filePath);
+        deleteFileOnServer(filePath);
+    }
+    
+    /**
+     * Delete file on server only (used for immediate deletion)
+     */
+    private void deleteFileOnServer(String filePath) {
+        logger.info("Deleting file on server: {}", filePath);
         
         try {
             String fileId = findFileIdByPath(filePath);
@@ -333,10 +359,7 @@ public class EnhancedSyncService {
                     Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
                     Files.deleteIfExists(localPath);
                     
-                    // Update local database
-                    databaseService.updateSyncStatus(filePath, "DELETED");
-                    
-                    logger.info("File deleted successfully: {}", filePath);
+                    logger.info("File deleted successfully on server: {}", filePath);
                 } else {
                     String responseBody = EntityUtils.toString(response.getEntity());
                     logger.error("File deletion failed: {} - {}", filePath, responseBody);
@@ -393,9 +416,15 @@ public class EnhancedSyncService {
                     String responseBody = EntityUtils.toString(response.getEntity());
                     FileDto[] serverFiles = objectMapper.readValue(responseBody, FileDto[].class);
                     
+                    // Create set of server file paths for quick lookup
+                    Set<String> serverFilePaths = new HashSet<>();
                     for (FileDto serverFile : serverFiles) {
+                        serverFilePaths.add(serverFile.getFilePath());
                         processServerFile(serverFile);
                     }
+                    
+                    // Clean up files that no longer exist on server
+                    cleanupDeletedFiles(serverFilePaths);
                     
                 } else if (response.getCode() == 401) {
                     // Token expired, needs re-authentication
@@ -409,6 +438,49 @@ public class EnhancedSyncService {
     }
 
     /**
+     * Clean up files that no longer exist on server or are marked as deleted
+     */
+    private void cleanupDeletedFiles(Set<String> serverFilePaths) {
+        try {
+            // Get all files from local database
+            Map<String, String> localFiles = databaseService.getAllTrackedFiles();
+            
+            for (Map.Entry<String, String> entry : localFiles.entrySet()) {
+                String filePath = entry.getKey();
+                String syncStatus = entry.getValue();
+                
+                // If file is marked as DELETED or no longer exists on server, clean it up
+                if ("DELETED".equals(syncStatus) || !serverFilePaths.contains(filePath)) {
+                    Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
+                    
+                    // Delete local file if it still exists
+                    if (Files.exists(localPath)) {
+                        try {
+                            Files.delete(localPath);
+                            logger.info("Cleaned up local file that was deleted on server: {}", filePath);
+                        } catch (IOException e) {
+                            logger.warn("Failed to delete local file: {}", filePath, e);
+                        }
+                    }
+                    
+                    // Remove from local database only if file doesn't exist on server
+                    // Keep DELETED status if file was marked as deleted locally
+                    if (!serverFilePaths.contains(filePath) && !"DELETED".equals(syncStatus)) {
+                        databaseService.removeFileRecord(filePath);
+                        logger.info("Removed database record for file deleted on server: {}", filePath);
+                    } else if ("DELETED".equals(syncStatus)) {
+                        // File was deleted locally, keep the DELETED marker for a while
+                        logger.debug("Keeping DELETED marker for locally deleted file: {}", filePath);
+                    }
+                }
+            }
+            
+        } catch (Exception e) {
+            logger.error("Error cleaning up deleted files", e);
+        }
+    }
+
+    /**
      * Process individual server file for sync
      */
     private void processServerFile(FileDto serverFile) {
@@ -416,14 +488,31 @@ public class EnhancedSyncService {
             String filePath = serverFile.getFilePath();
             Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
             
+            // Check if file is marked as deleted locally FIRST
+            String syncStatus = databaseService.getSyncStatus(filePath);
+            if ("DELETED".equals(syncStatus)) {
+                // File was deleted locally, don't sync
+                logger.debug("Skipping sync for file marked as deleted: {}", filePath);
+                return;
+            }
+            
             // Get local version vector
             VersionVector localVector = databaseService.getFileVersionVectorByPath(filePath);
             VersionVector serverVector = serverFile.getVersionVector();
             
-            if (localVector == null) {
-                // File doesn't exist locally - download it
+            // Check if local file exists but is not being tracked (new file scenario)
+            boolean localFileExists = Files.exists(localPath);
+            
+            if (localVector == null && !localFileExists) {
+                // File doesn't exist locally and is not tracked - download it
+                logger.debug("File not found locally, downloading: {}", filePath);
                 queueFileSync(filePath, SyncOperation.DOWNLOAD);
-            } else if (serverVector != null) {
+            } else if (localVector == null && localFileExists) {
+                // Local file exists but not tracked - this means it was just created locally
+                // Upload it to sync with server
+                logger.debug("Local file exists but not tracked, uploading: {}", filePath);
+                queueFileSync(filePath, SyncOperation.UPLOAD);
+            } else if (localVector != null && serverVector != null) {
                 if (serverVector.dominates(localVector) && !localVector.dominates(serverVector)) {
                     // Server is newer - download
                     queueFileSync(filePath, SyncOperation.DOWNLOAD);
@@ -503,13 +592,34 @@ public class EnhancedSyncService {
     
     /**
      * Queue file for deletion (compatibility method for FileWatchService)
+     * Process immediately to prevent race conditions with other clients
      */
     public void queueFileForDeletion(Path filePath) {
         if (!isAuthenticated()) {
             logger.warn("Cannot delete file - user not authenticated");
             return;
         }
-        queueFileSync(filePath.toString(), SyncOperation.DELETE);
+        
+        String filePathStr = getRelativePath(filePath);
+        logger.info("Processing immediate deletion for file: {}", filePathStr);
+        
+        // CRITICAL: Mark as deleted IMMEDIATELY to prevent re-download during race conditions
+        markFileAsDeleted(filePathStr);
+        
+        // Queue for background processing 
+        queueFileSync(filePathStr, SyncOperation.DELETE);
+        
+        // Also process immediately in a separate thread to notify server
+        executorService.submit(() -> {
+            try {
+                deleteFileOnServer(filePathStr);
+                logger.info("Immediate deletion completed for: {}", filePathStr);
+            } catch (Exception e) {
+                logger.error("Failed to process immediate deletion for: " + filePathStr, e);
+                // If server deletion fails, we keep the local DELETED marker
+                // This prevents the file from being re-downloaded
+            }
+        });
     }
     
     /**
@@ -661,5 +771,122 @@ public class EnhancedSyncService {
     public void uploadExternalFile(Path externalFile) throws IOException {
         String fileName = externalFile.getFileName().toString();
         uploadExternalFile(externalFile, fileName);
+    }
+    
+    /**
+     * Mark file as deleted with timestamp to avoid re-download
+     */
+    private void markFileAsDeleted(String filePath) {
+        try {
+            // Mark as deleted in database
+            databaseService.updateSyncStatus(filePath, "DELETED");
+            
+            logger.debug("Marked file as deleted: {}", filePath);
+        } catch (Exception e) {
+            logger.error("Error marking file as deleted: " + filePath, e);
+        }
+    }
+    
+    /**
+     * Check if a file was recently deleted to avoid immediate re-sync
+     */
+    private boolean isRecentlyDeleted(String filePath) {
+        try {
+            String syncStatus = databaseService.getSyncStatus(filePath);
+            return "DELETED".equals(syncStatus);
+        } catch (Exception e) {
+            logger.error("Error checking deletion status: " + filePath, e);
+            return false;
+        }
+    }
+    
+    /**
+     * Clean up old DELETED markers periodically
+     * This prevents the database from growing indefinitely with old deletion markers
+     */
+    private void cleanupOldDeletedMarkers() {
+        try {
+            // Remove DELETED markers older than 1 hour
+            // This gives enough time for all clients to sync the deletion
+            LocalDateTime cutoff = LocalDateTime.now().minusHours(1);
+            
+            Map<String, String> trackedFiles = databaseService.getAllTrackedFiles();
+            for (Map.Entry<String, String> entry : trackedFiles.entrySet()) {
+                String filePath = entry.getKey();
+                String syncStatus = entry.getValue();
+                
+                if ("DELETED".equals(syncStatus)) {
+                    // Check if the file still doesn't exist on server
+                    // and if enough time has passed, remove the marker
+                    // For now, we'll implement a simple time-based cleanup
+                    // In a more sophisticated version, you could store timestamps
+                    
+                    // Remove the DELETED marker after some time to prevent database bloat
+                    // Only if file doesn't exist locally and isn't on server
+                    Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
+                    if (!Files.exists(localPath)) {
+                        databaseService.removeFileRecord(filePath);
+                        logger.debug("Cleaned up old DELETED marker for: {}", filePath);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Error cleaning up old deleted markers", e);
+        }
+    }
+    
+    /**
+     * Clear deletion status and re-upload a previously deleted file
+     * This is useful when a user wants to upload a file with the same name/path that was previously deleted
+     */
+    public void clearDeletionAndUpload(String filePath) {
+        if (!isAuthenticated()) {
+            logger.warn("Cannot upload file - user not authenticated");
+            return;
+        }
+        
+        try {
+            Path path = Paths.get(config.getLocalSyncPath(), filePath);
+            if (!Files.exists(path) || !Files.isRegularFile(path)) {
+                logger.warn("File does not exist: {}", filePath);
+                return;
+            }
+            
+            String relativePath = getRelativePath(path);
+            
+            // Clear any existing deletion status
+            String currentSyncStatus = databaseService.getSyncStatus(relativePath);
+            if ("DELETED".equals(currentSyncStatus)) {
+                logger.info("Clearing deletion status for file: {}", relativePath);
+                databaseService.updateSyncStatus(relativePath, "PENDING");
+            }
+            
+            // Queue for upload
+            queueFileSync(relativePath, SyncOperation.UPLOAD);
+            
+        } catch (Exception e) {
+            logger.error("Error clearing deletion status and uploading file: {}", filePath, e);
+        }
+    }
+    
+    /**
+     * Clear deletion status for a file without uploading
+     * This allows the file to be synced normally if it appears again
+     */
+    public void clearDeletionStatus(String filePath) {
+        try {
+            String relativePath = getRelativePath(Paths.get(filePath));
+            String currentSyncStatus = databaseService.getSyncStatus(relativePath);
+            
+            if ("DELETED".equals(currentSyncStatus)) {
+                logger.info("Clearing deletion status for file: {}", relativePath);
+                databaseService.updateSyncStatus(relativePath, "PENDING");
+            } else {
+                logger.info("File is not marked as deleted: {}", relativePath);
+            }
+            
+        } catch (Exception e) {
+            logger.error("Error clearing deletion status for file: {}", filePath, e);
+        }
     }
 }

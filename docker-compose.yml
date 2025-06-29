@@ -41,7 +41,7 @@ services:
       - "8081:8081"
     environment:
       - SERVER_URL=http://server:8080
-      - DISPLAY=${DISPLAY}
+      - DISPLAY=host.docker.internal:0
     depends_on:
       server:
         condition: service_healthy

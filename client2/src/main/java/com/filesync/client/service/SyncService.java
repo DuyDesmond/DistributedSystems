@@ -246,9 +246,14 @@ public class SyncService {
         try {
             Path localPath = Paths.get(config.getLocalSyncPath(), serverFile.getFilePath());
             
-            // Simple check - download if local file doesn't exist
-            // In reality, you'd compare checksums and version vectors
+            // Don't download if file was recently deleted
+            // Check if the file was deleted in this session (simple approach)
             if (!Files.exists(localPath)) {
+                // TODO: Add proper deletion tracking with database or file tracking
+                // For now, just add a warning that file will be re-downloaded
+                logger.warn("File {} doesn't exist locally and will be downloaded. " +
+                           "To prevent re-download of deleted files, use EnhancedSyncService instead.", 
+                           serverFile.getFilePath());
                 downloadFile(serverFile.getFileId(), localPath);
             }
         } catch (Exception e) {

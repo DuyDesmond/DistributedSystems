@@ -8,6 +8,9 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -51,6 +54,38 @@ public class EnhancedSyncService {
     private final BlockingQueue<SyncTask> syncQueue = new LinkedBlockingQueue<>();
     private volatile boolean running = false;
     
+    /**
+     * Calculate SHA-256 checksum of file data
+     */
+    private String calculateChecksum(byte[] data) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(data);
+            StringBuilder hexString = new StringBuilder();
+            
+            for (byte b : hash) {
+                String hex = Integer.toHexString(0xff & b);
+                if (hex.length() == 1) {
+                    hexString.append('0');
+                }
+                hexString.append(hex);
+            }
+            
+            return hexString.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("SHA-256 algorithm not available", e);
+        }
+    }
+
+    /**
+     * Get relative path for sync
+     */
+    private String getRelativePath(Path filePath) {
+        Path syncRoot = Paths.get(config.getLocalSyncPath());
+        Path relativePath = syncRoot.relativize(filePath);
+        return relativePath.toString().replace('\\', '/'); // Normalize to forward slashes
+    }
+
     public EnhancedSyncService(ClientConfig config, DatabaseService databaseService, 
                               ScheduledExecutorService executorService) {
         this.config = config;
@@ -66,74 +101,17 @@ public class EnhancedSyncService {
     }
     
     /**
-     * Calculate SHA-256 checksum of file data
-     */
-    private String calculateChecksum(byte[] data) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(data);
-            StringBuilder hexString = new StringBuilder();
-            for (byte b : hash) {
-                String hex = Integer.toHexString(0xff & b);
-                if (hex.length() == 1) {
-                    hexString.append('0');
-                }
-                hexString.append(hex);
-            }
-            return hexString.toString();
-        } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException("SHA-256 algorithm not available", e);
-        }
-    }
-    
-    /**
-     * Get relative path for sync
-     */
-    private String getRelativePath(Path filePath) {
-        try {
-            Path syncPath = Paths.get(config.getLocalSyncPath()).toAbsolutePath();
-            Path absoluteFilePath = filePath.toAbsolutePath();
-            return syncPath.relativize(absoluteFilePath).toString().replace("\\", "/");
-        } catch (Exception e) {
-            logger.warn("Could not get relative path for: {}", filePath);
-            return filePath.getFileName().toString();
-        }
-    }
-    
-    /**
      * Generate unique client ID
      */
     private String generateClientId() {
-        return config.getClientId() != null ? config.getClientId() : 
-               config.getUsername() + "_" + System.currentTimeMillis();
+        String existingId = databaseService.getConfig("client_id", null);
+        if (existingId == null) {
+            existingId = UUID.randomUUID().toString();
+            databaseService.setConfig("client_id", existingId);
+        }
+        return existingId;
     }
     
-    /**
-     * Find file ID by path from server
-     */
-    private String findFileIdByPath(String relativePath) {
-        try {
-            HttpGet get = new HttpGet(config.getServerUrl() + "/files/");
-            get.setHeader("Authorization", "Bearer " + config.getToken());
-            
-            try (CloseableHttpResponse response = httpClient.execute(get)) {
-                if (response.getCode() == 200) {
-                    String responseBody = EntityUtils.toString(response.getEntity());
-                    FileDto[] files = objectMapper.readValue(responseBody, FileDto[].class);
-                    
-                    for (FileDto file : files) {
-                        if (relativePath.equals(file.getFilePath())) {
-                            return file.getFileId();
-                        }
-                    }
-                }
-            }
-        } catch (Exception e) {
-            logger.error("Error finding file ID for path: {}", relativePath, e);
-        }
-        return null;
-    }
-
     /**
      * Start background sync processor
      */
@@ -180,6 +158,10 @@ public class EnhancedSyncService {
             
             // Get updates from server
             getServerUpdates();
+            
+            // Clean up old DELETED markers periodically (every hour)
+            // This prevents database bloat while giving enough time for sync coordination
+            cleanupOldDeletedMarkers();
             
         } catch (Exception e) {
             logger.error("Error during periodic sync", e);
@@ -229,8 +211,7 @@ public class EnhancedSyncService {
             case DOWNLOAD -> 4;
         };
     }
-    
-    /**
+      /**
      * Upload file implementation
      */
     private void uploadFile(String filePath) {
@@ -243,20 +224,29 @@ public class EnhancedSyncService {
                 return;
             }
             
+            String relativePath = getRelativePath(path);
+            
+            // Check if file is marked as deleted - if so, clear the deletion status for re-upload
+            String currentSyncStatus = databaseService.getSyncStatus(relativePath);
+            if ("DELETED".equals(currentSyncStatus)) {
+                logger.info("File was previously deleted but now exists again. Clearing deletion status and uploading: {}", relativePath);
+                // Clear the DELETED status to allow re-upload
+                databaseService.updateSyncStatus(relativePath, "PENDING");
+            }
+            
             // Calculate file info
             byte[] fileData = Files.readAllBytes(path);
             String checksum = calculateChecksum(fileData);
             long fileSize = Files.size(path);
-            String relativePath = getRelativePath(path);
             
             // Get or create version vector
             VersionVector versionVector = databaseService.getFileVersionVectorByPath(relativePath);
             if (versionVector == null) {
                 versionVector = new VersionVector();
             }
-            versionVector.increment(config.getClientId());
+            versionVector.increment(clientId);
             
-            // Store version vector locally
+            // Store version vector locally first
             String fileId = UUID.randomUUID().toString();
             databaseService.storeFileVersionVector(fileId, relativePath, versionVector, 
                 LocalDateTime.now(), fileSize, checksum);
@@ -269,7 +259,7 @@ public class EnhancedSyncService {
             builder.addBinaryBody("file", fileData, ContentType.APPLICATION_OCTET_STREAM, 
                 path.getFileName().toString());
             builder.addTextBody("path", relativePath, ContentType.TEXT_PLAIN);
-            builder.addTextBody("clientId", config.getClientId(), ContentType.TEXT_PLAIN);
+            builder.addTextBody("clientId", clientId, ContentType.TEXT_PLAIN);
             builder.addTextBody("versionVector", versionVector.toJson(), ContentType.TEXT_PLAIN);
             builder.addTextBody("checksum", checksum, ContentType.TEXT_PLAIN);
             
@@ -291,7 +281,7 @@ public class EnhancedSyncService {
             // Retry logic could be added here
         }
     }
-    
+
     /**
      * Download file implementation
      */
@@ -335,12 +325,22 @@ public class EnhancedSyncService {
             logger.error("Error downloading file: {}", filePath, e);
         }
     }
-    
+
+    /**
+     * Delete file implementation
+     */
     /**
      * Delete file implementation
      */
     private void deleteFile(String filePath) {
-        logger.info("Deleting file: {}", filePath);
+        deleteFileOnServer(filePath);
+    }
+    
+    /**
+     * Delete file on server only (used for immediate deletion)
+     */
+    private void deleteFileOnServer(String filePath) {
+        logger.info("Deleting file on server: {}", filePath);
         
         try {
             String fileId = findFileIdByPath(filePath);
@@ -359,10 +359,7 @@ public class EnhancedSyncService {
                     Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
                     Files.deleteIfExists(localPath);
                     
-                    // Update local database
-                    databaseService.updateSyncStatus(filePath, "DELETED");
-                    
-                    logger.info("File deleted successfully: {}", filePath);
+                    logger.info("File deleted successfully on server: {}", filePath);
                 } else {
                     String responseBody = EntityUtils.toString(response.getEntity());
                     logger.error("File deletion failed: {} - {}", filePath, responseBody);
@@ -373,7 +370,7 @@ public class EnhancedSyncService {
             logger.error("Error deleting file: {}", filePath, e);
         }
     }
-    
+
     /**
      * Resolve conflict implementation
      */
@@ -403,7 +400,7 @@ public class EnhancedSyncService {
             logger.error("Error resolving conflict for: {}", filePath, e);
         }
     }
-    
+
     /**
      * Get server updates implementation
      */
@@ -419,9 +416,15 @@ public class EnhancedSyncService {
                     String responseBody = EntityUtils.toString(response.getEntity());
                     FileDto[] serverFiles = objectMapper.readValue(responseBody, FileDto[].class);
                     
+                    // Create set of server file paths for quick lookup
+                    Set<String> serverFilePaths = new HashSet<>();
                     for (FileDto serverFile : serverFiles) {
+                        serverFilePaths.add(serverFile.getFilePath());
                         processServerFile(serverFile);
                     }
+                    
+                    // Clean up files that no longer exist on server
+                    cleanupDeletedFiles(serverFilePaths);
                     
                 } else if (response.getCode() == 401) {
                     // Token expired, needs re-authentication
@@ -433,7 +436,50 @@ public class EnhancedSyncService {
             logger.error("Error getting server updates", e);
         }
     }
-    
+
+    /**
+     * Clean up files that no longer exist on server or are marked as deleted
+     */
+    private void cleanupDeletedFiles(Set<String> serverFilePaths) {
+        try {
+            // Get all files from local database
+            Map<String, String> localFiles = databaseService.getAllTrackedFiles();
+            
+            for (Map.Entry<String, String> entry : localFiles.entrySet()) {
+                String filePath = entry.getKey();
+                String syncStatus = entry.getValue();
+                
+                // If file is marked as DELETED or no longer exists on server, clean it up
+                if ("DELETED".equals(syncStatus) || !serverFilePaths.contains(filePath)) {
+                    Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
+                    
+                    // Delete local file if it still exists
+                    if (Files.exists(localPath)) {
+                        try {
+                            Files.delete(localPath);
+                            logger.info("Cleaned up local file that was deleted on server: {}", filePath);
+                        } catch (IOException e) {
+                            logger.warn("Failed to delete local file: {}", filePath, e);
+                        }
+                    }
+                    
+                    // Remove from local database only if file doesn't exist on server
+                    // Keep DELETED status if file was marked as deleted locally
+                    if (!serverFilePaths.contains(filePath) && !"DELETED".equals(syncStatus)) {
+                        databaseService.removeFileRecord(filePath);
+                        logger.info("Removed database record for file deleted on server: {}", filePath);
+                    } else if ("DELETED".equals(syncStatus)) {
+                        // File was deleted locally, keep the DELETED marker for a while
+                        logger.debug("Keeping DELETED marker for locally deleted file: {}", filePath);
+                    }
+                }
+            }
+            
+        } catch (Exception e) {
+            logger.error("Error cleaning up deleted files", e);
+        }
+    }
+
     /**
      * Process individual server file for sync
      */
@@ -442,14 +488,31 @@ public class EnhancedSyncService {
             String filePath = serverFile.getFilePath();
             Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
             
+            // Check if file is marked as deleted locally FIRST
+            String syncStatus = databaseService.getSyncStatus(filePath);
+            if ("DELETED".equals(syncStatus)) {
+                // File was deleted locally, don't sync
+                logger.debug("Skipping sync for file marked as deleted: {}", filePath);
+                return;
+            }
+            
             // Get local version vector
             VersionVector localVector = databaseService.getFileVersionVectorByPath(filePath);
             VersionVector serverVector = serverFile.getVersionVector();
             
-            if (localVector == null) {
-                // File doesn't exist locally - download it
+            // Check if local file exists but is not being tracked (new file scenario)
+            boolean localFileExists = Files.exists(localPath);
+            
+            if (localVector == null && !localFileExists) {
+                // File doesn't exist locally and is not tracked - download it
+                logger.debug("File not found locally, downloading: {}", filePath);
                 queueFileSync(filePath, SyncOperation.DOWNLOAD);
-            } else if (serverVector != null) {
+            } else if (localVector == null && localFileExists) {
+                // Local file exists but not tracked - this means it was just created locally
+                // Upload it to sync with server
+                logger.debug("Local file exists but not tracked, uploading: {}", filePath);
+                queueFileSync(filePath, SyncOperation.UPLOAD);
+            } else if (localVector != null && serverVector != null) {
                 if (serverVector.dominates(localVector) && !localVector.dominates(serverVector)) {
                     // Server is newer - download
                     queueFileSync(filePath, SyncOperation.DOWNLOAD);
@@ -465,6 +528,133 @@ public class EnhancedSyncService {
             
         } catch (Exception e) {
             logger.error("Error processing server file: {}", serverFile.getFilePath(), e);
+        }
+    }
+
+    /**
+     * Find file ID by path from server
+     */
+    private String findFileIdByPath(String relativePath) {
+        try {
+            HttpGet get = new HttpGet(config.getServerUrl() + "/files/");
+            get.setHeader("Authorization", "Bearer " + config.getToken());
+            
+            try (CloseableHttpResponse response = httpClient.execute(get)) {
+                if (response.getCode() == 200) {
+                    String responseBody = EntityUtils.toString(response.getEntity());
+                    FileDto[] files = objectMapper.readValue(responseBody, FileDto[].class);
+                    
+                    for (FileDto file : files) {
+                        if (file.getFilePath().equals(relativePath)) {
+                            return file.getFileId();
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Error finding file ID for path: {}", relativePath, e);
+        }
+        return null;
+    }
+
+    /**
+     * Public method to upload a specific file
+     */
+    public void uploadFileManually(String filePath) {
+        if (!isAuthenticated()) {
+            logger.warn("Cannot upload file - user not authenticated");
+            return;
+        }
+        queueFileSync(filePath, SyncOperation.UPLOAD);
+    }
+
+    /**
+     * Public method to delete a specific file
+     */
+    public void deleteFileManually(String filePath) {
+        if (!isAuthenticated()) {
+            logger.warn("Cannot delete file - user not authenticated");
+            return;
+        }
+        queueFileSync(filePath, SyncOperation.DELETE);
+    }
+    
+    /**
+     * Queue file for upload (compatibility method for FileWatchService)
+     */
+    public void queueFileForUpload(Path filePath) {
+        if (!isAuthenticated()) {
+            logger.warn("Cannot upload file - user not authenticated");
+            return;
+        }
+        queueFileSync(filePath.toString(), SyncOperation.UPLOAD);
+    }
+    
+    /**
+     * Queue file for deletion (compatibility method for FileWatchService)
+     * Process immediately to prevent race conditions with other clients
+     */
+    public void queueFileForDeletion(Path filePath) {
+        if (!isAuthenticated()) {
+            logger.warn("Cannot delete file - user not authenticated");
+            return;
+        }
+        
+        String filePathStr = getRelativePath(filePath);
+        logger.info("Processing immediate deletion for file: {}", filePathStr);
+        
+        // CRITICAL: Mark as deleted IMMEDIATELY to prevent re-download during race conditions
+        markFileAsDeleted(filePathStr);
+        
+        // Queue for background processing 
+        queueFileSync(filePathStr, SyncOperation.DELETE);
+        
+        // Also process immediately in a separate thread to notify server
+        executorService.submit(() -> {
+            try {
+                deleteFileOnServer(filePathStr);
+                logger.info("Immediate deletion completed for: {}", filePathStr);
+            } catch (Exception e) {
+                logger.error("Failed to process immediate deletion for: " + filePathStr, e);
+                // If server deletion fails, we keep the local DELETED marker
+                // This prevents the file from being re-downloaded
+            }
+        });
+    }
+    
+    /**
+     * Check if user is logged in (compatibility method for MainController)
+     */
+    public boolean isLoggedIn() {
+        return isAuthenticated();
+    }
+    
+    /**
+     * Register a new user (compatibility method for MainController)
+     */
+    public boolean register(String username, String email, String password) {
+        try {
+            AuthDto registerRequest = AuthDto.registerRequest(username, email, password);
+            String json = objectMapper.writeValueAsString(registerRequest);
+            
+            HttpPost post = new HttpPost(config.getServerUrl() + "/auth/register");
+            post.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
+            post.setHeader("Content-Type", "application/json");
+            
+            try (CloseableHttpResponse response = httpClient.execute(post)) {
+                String responseBody = EntityUtils.toString(response.getEntity());
+                
+                if (response.getCode() == 200) {
+                    logger.info("Registration successful for user: {}", username);
+                    return login(username, password); // Auto-login after registration
+                } else {
+                    logger.error("Registration failed: {}", responseBody);
+                    return false;
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Registration error", e);
+            return false;
         }
     }
     
@@ -504,86 +694,6 @@ public class EnhancedSyncService {
     }
     
     /**
-     * Public method to upload a specific file
-     */
-    public void uploadFileManually(String filePath) {
-        if (!isAuthenticated()) {
-            logger.warn("Cannot upload file - user not authenticated");
-            return;
-        }
-        queueFileSync(filePath, SyncOperation.UPLOAD);
-    }
-    
-    /**
-     * Public method to delete a specific file
-     */
-    public void deleteFileManually(String filePath) {
-        if (!isAuthenticated()) {
-            logger.warn("Cannot delete file - user not authenticated");
-            return;
-        }
-        queueFileSync(filePath, SyncOperation.DELETE);
-    }
-
-    /**
-     * Queue file for upload (compatibility method for FileWatchService)
-     */
-    public void queueFileForUpload(Path filePath) {
-        if (!isAuthenticated()) {
-            logger.warn("Cannot upload file - user not authenticated");
-            return;
-        }
-        queueFileSync(filePath.toString(), SyncOperation.UPLOAD);
-    }
-    
-    /**
-     * Queue file for deletion (compatibility method for FileWatchService)
-     */
-    public void queueFileForDeletion(Path filePath) {
-        if (!isAuthenticated()) {
-            logger.warn("Cannot delete file - user not authenticated");
-            return;
-        }
-        queueFileSync(filePath.toString(), SyncOperation.DELETE);
-    }
-    
-    /**
-     * Check if user is logged in (compatibility method for MainController)
-     */
-    public boolean isLoggedIn() {
-        return isAuthenticated();
-    }
-    
-    /**
-     * Register a new user (compatibility method for MainController)
-     */
-    public boolean register(String username, String email, String password) {
-        try {
-            AuthDto registerRequest = AuthDto.registerRequest(username, email, password);
-            String json = objectMapper.writeValueAsString(registerRequest);
-            
-            HttpPost post = new HttpPost(config.getServerUrl() + "/auth/register");
-            post.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
-            post.setHeader("Content-Type", "application/json");
-            
-            try (CloseableHttpResponse response = httpClient.execute(post)) {
-                String responseBody = EntityUtils.toString(response.getEntity());
-                
-                if (response.getCode() == 200) {
-                    logger.info("Registration successful for user: {}", username);
-                    return login(username, password); // Auto-login after registration
-                } else {
-                    logger.error("Registration failed: {}", responseBody);
-                    return false;
-                }
-            }
-        } catch (Exception e) {
-            logger.error("Registration error", e);
-            return false;
-        }
-    }
-
-    /**
      * Stop the sync service
      */
     public void stop() {
@@ -595,6 +705,26 @@ public class EnhancedSyncService {
         }
     }
     
+    /**
+     * Sync task representation
+     */
+    private static class SyncTask {
+        final String filePath;
+        final SyncOperation operation;
+        
+        SyncTask(String filePath, SyncOperation operation) {
+            this.filePath = filePath;
+            this.operation = operation;
+        }
+    }
+    
+    /**
+     * Sync operation types
+     */
+    public enum SyncOperation {
+        UPLOAD, DOWNLOAD, DELETE, CONFLICT_RESOLVE
+    }
+
     /**
      * Upload external file by copying it to sync directory first
      */
@@ -642,24 +772,121 @@ public class EnhancedSyncService {
         String fileName = externalFile.getFileName().toString();
         uploadExternalFile(externalFile, fileName);
     }
-
+    
     /**
-     * Sync task representation
+     * Mark file as deleted with timestamp to avoid re-download
      */
-    private static class SyncTask {
-        final String filePath;
-        final SyncOperation operation;
-        
-        SyncTask(String filePath, SyncOperation operation) {
-            this.filePath = filePath;
-            this.operation = operation;
+    private void markFileAsDeleted(String filePath) {
+        try {
+            // Mark as deleted in database
+            databaseService.updateSyncStatus(filePath, "DELETED");
+            
+            logger.debug("Marked file as deleted: {}", filePath);
+        } catch (Exception e) {
+            logger.error("Error marking file as deleted: " + filePath, e);
         }
     }
     
     /**
-     * Sync operation types
+     * Check if a file was recently deleted to avoid immediate re-sync
      */
-    public enum SyncOperation {
-        UPLOAD, DOWNLOAD, DELETE, CONFLICT_RESOLVE
+    private boolean isRecentlyDeleted(String filePath) {
+        try {
+            String syncStatus = databaseService.getSyncStatus(filePath);
+            return "DELETED".equals(syncStatus);
+        } catch (Exception e) {
+            logger.error("Error checking deletion status: " + filePath, e);
+            return false;
+        }
+    }
+    
+    /**
+     * Clean up old DELETED markers periodically
+     * This prevents the database from growing indefinitely with old deletion markers
+     */
+    private void cleanupOldDeletedMarkers() {
+        try {
+            // Remove DELETED markers older than 1 hour
+            // This gives enough time for all clients to sync the deletion
+            LocalDateTime cutoff = LocalDateTime.now().minusHours(1);
+            
+            Map<String, String> trackedFiles = databaseService.getAllTrackedFiles();
+            for (Map.Entry<String, String> entry : trackedFiles.entrySet()) {
+                String filePath = entry.getKey();
+                String syncStatus = entry.getValue();
+                
+                if ("DELETED".equals(syncStatus)) {
+                    // Check if the file still doesn't exist on server
+                    // and if enough time has passed, remove the marker
+                    // For now, we'll implement a simple time-based cleanup
+                    // In a more sophisticated version, you could store timestamps
+                    
+                    // Remove the DELETED marker after some time to prevent database bloat
+                    // Only if file doesn't exist locally and isn't on server
+                    Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
+                    if (!Files.exists(localPath)) {
+                        databaseService.removeFileRecord(filePath);
+                        logger.debug("Cleaned up old DELETED marker for: {}", filePath);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Error cleaning up old deleted markers", e);
+        }
+    }
+    
+    /**
+     * Clear deletion status and re-upload a previously deleted file
+     * This is useful when a user wants to upload a file with the same name/path that was previously deleted
+     */
+    public void clearDeletionAndUpload(String filePath) {
+        if (!isAuthenticated()) {
+            logger.warn("Cannot upload file - user not authenticated");
+            return;
+        }
+        
+        try {
+            Path path = Paths.get(config.getLocalSyncPath(), filePath);
+            if (!Files.exists(path) || !Files.isRegularFile(path)) {
+                logger.warn("File does not exist: {}", filePath);
+                return;
+            }
+            
+            String relativePath = getRelativePath(path);
+            
+            // Clear any existing deletion status
+            String currentSyncStatus = databaseService.getSyncStatus(relativePath);
+            if ("DELETED".equals(currentSyncStatus)) {
+                logger.info("Clearing deletion status for file: {}", relativePath);
+                databaseService.updateSyncStatus(relativePath, "PENDING");
+            }
+            
+            // Queue for upload
+            queueFileSync(relativePath, SyncOperation.UPLOAD);
+            
+        } catch (Exception e) {
+            logger.error("Error clearing deletion status and uploading file: {}", filePath, e);
+        }
+    }
+    
+    /**
+     * Clear deletion status for a file without uploading
+     * This allows the file to be synced normally if it appears again
+     */
+    public void clearDeletionStatus(String filePath) {
+        try {
+            String relativePath = getRelativePath(Paths.get(filePath));
+            String currentSyncStatus = databaseService.getSyncStatus(relativePath);
+            
+            if ("DELETED".equals(currentSyncStatus)) {
+                logger.info("Clearing deletion status for file: {}", relativePath);
+                databaseService.updateSyncStatus(relativePath, "PENDING");
+            } else {
+                logger.info("File is not marked as deleted: {}", relativePath);
+            }
+            
+        } catch (Exception e) {
+            logger.error("Error clearing deletion status for file: {}", filePath, e);
+        }
     }
 }

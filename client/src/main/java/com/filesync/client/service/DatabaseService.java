@@ -216,6 +216,28 @@ public class DatabaseService {
     }
     
     /**
+     * Get sync status for a file
+     */
+    public String getSyncStatus(String filePath) {
+        String sql = "SELECT sync_status FROM file_version_vector WHERE file_path = ?";
+        
+        try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
+            pstmt.setString(1, filePath);
+            
+            try (ResultSet rs = pstmt.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getString("sync_status");
+                }
+            }
+            
+        } catch (SQLException e) {
+            logger.error("Failed to get sync status for: " + filePath, e);
+        }
+        
+        return null;
+    }
+    
+    /**
      * Add item to sync queue
      */
     public void addToSyncQueue(String filePath, String operation, int priority) {
@@ -323,6 +345,55 @@ public class DatabaseService {
         }
         
         return defaultValue;
+    }
+    
+    /**
+     * Get all tracked files with their sync status
+     */
+    public Map<String, String> getAllTrackedFiles() {
+        Map<String, String> trackedFiles = new HashMap<>();
+        String sql = "SELECT file_path, sync_status FROM file_version_vector";
+        
+        try (PreparedStatement pstmt = connection.prepareStatement(sql);
+             ResultSet rs = pstmt.executeQuery()) {
+            
+            while (rs.next()) {
+                String filePath = rs.getString("file_path");
+                String syncStatus = rs.getString("sync_status");
+                trackedFiles.put(filePath, syncStatus);
+            }
+            
+        } catch (SQLException e) {
+            logger.error("Failed to get all tracked files", e);
+        }
+        
+        return trackedFiles;
+    }
+
+    /**
+     * Remove file record from database
+     */
+    public void removeFileRecord(String filePath) {
+        String sql1 = "DELETE FROM file_version_vector WHERE file_path = ?";
+        String sql2 = "DELETE FROM sync_queue WHERE file_path = ?";
+        
+        try (PreparedStatement pstmt1 = connection.prepareStatement(sql1);
+             PreparedStatement pstmt2 = connection.prepareStatement(sql2)) {
+            
+            // Remove from file_version_vector table
+            pstmt1.setString(1, filePath);
+            int deleted1 = pstmt1.executeUpdate();
+            
+            // Remove from sync_queue table
+            pstmt2.setString(1, filePath);
+            int deleted2 = pstmt2.executeUpdate();
+            
+            logger.debug("Removed file record: {} (version_vector: {}, sync_queue: {})", 
+                        filePath, deleted1, deleted2);
+            
+        } catch (SQLException e) {
+            logger.error("Failed to remove file record: " + filePath, e);
+        }
     }
     
     /**

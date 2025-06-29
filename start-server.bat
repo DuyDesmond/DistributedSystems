@@ -1,5 +1,5 @@
 @echo off
-cd /d "c:\Users\Admin\Documents\GitHub\DistributedSystems\server"
+cd /d "e:\MyUni\3rd_year_FRAUAS\Sem2\DistributedSystems\Project\DistributedSystems\server"
 
 echo Starting File Sync Server...
 echo.
