@@ -1,18 +1,8 @@
 package com.filesync.server.service;
 
-import com.filesync.common.dto.FileDto;
-import com.filesync.common.model.VersionVector;
-import com.filesync.server.entity.FileEntity;
-import com.filesync.server.entity.UserEntity;
-import com.filesync.server.repository.FileRepository;
-import com.filesync.server.repository.UserRepository;
-import jakarta.servlet.http.HttpServletResponse;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
-import org.springframework.web.multipart.MultipartFile;
-
-import java.io.*;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -22,6 +12,19 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
+
+import com.filesync.common.dto.FileDto;
+import com.filesync.server.entity.FileEntity;
+import com.filesync.server.entity.UserEntity;
+import com.filesync.server.repository.FileRepository;
+import com.filesync.server.repository.UserRepository;
+
+import jakarta.servlet.http.HttpServletResponse;
 
 /**
  * File Service for handling file operations
@@ -34,6 +37,9 @@ public class FileService {
     
     @Autowired
     private UserRepository userRepository;
+    
+    @Autowired
+    private ChunkService chunkService;
     
     @Value("${filesync.storage.base-path:./storage}")
     private String storageBasePath;

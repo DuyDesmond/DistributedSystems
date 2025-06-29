@@ -1,0 +1,307 @@
+services:
+  # nginx Load Balancer
+  nginx:
+    image: nginx:alpine
+    container_name: filesync-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - server-1
+      - server-2
+      - server-3
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # File Sync Server - Instance 1
+  server-1:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: filesync-server-1
+    ports:
+      - "8081:8080"
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/filesync
+      - SPRING_DATASOURCE_USERNAME=filesync
+      - SPRING_DATASOURCE_PASSWORD=filesync123
+      - SPRING_REDIS_HOST=redis
+      - SPRING_REDIS_PORT=6379
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - SPRING_RABBITMQ_PORT=5672
+      - SPRING_RABBITMQ_USERNAME=guest
+      - SPRING_RABBITMQ_PASSWORD=guest
+      - SERVER_INSTANCE_ID=server-1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # File Sync Server - Instance 2
+  server-2:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: filesync-server-2
+    ports:
+      - "8082:8080"
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/filesync
+      - SPRING_DATASOURCE_USERNAME=filesync
+      - SPRING_DATASOURCE_PASSWORD=filesync123
+      - SPRING_REDIS_HOST=redis
+      - SPRING_REDIS_PORT=6379
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - SPRING_RABBITMQ_PORT=5672
+      - SPRING_RABBITMQ_USERNAME=guest
+      - SPRING_RABBITMQ_PASSWORD=guest
+      - SERVER_INSTANCE_ID=server-2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # File Sync Server - Instance 3
+  server-3:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: filesync-server-3
+    ports:
+      - "8083:8080"
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/filesync
+      - SPRING_DATASOURCE_USERNAME=filesync
+      - SPRING_DATASOURCE_PASSWORD=filesync123
+      - SPRING_REDIS_HOST=redis
+      - SPRING_REDIS_PORT=6379
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - SPRING_RABBITMQ_PORT=5672
+      - SPRING_RABBITMQ_USERNAME=guest
+      - SPRING_RABBITMQ_PASSWORD=guest
+      - SERVER_INSTANCE_ID=server-3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # File Sync Client
+  client:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    container_name: filesync-client
+    ports:
+      - "8084:8081"
+    environment:
+      - SERVER_URL=http://nginx:80
+      - DISPLAY=host.docker.internal:0
+    depends_on:
+      nginx:
+        condition: service_healthy
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    network_mode: host
+
+  # PostgreSQL with replication setup (Master)
+  postgres:
+    image: postgres:15-alpine
+    container_name: filesync-postgres-master
+    environment:
+      POSTGRES_DB: filesync
+      POSTGRES_USER: filesync
+      POSTGRES_PASSWORD: filesync123
+      POSTGRES_REPLICATION_USER: replicator
+      POSTGRES_REPLICATION_PASSWORD: replicator123
+      PGUSER: filesync
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init/setup-replication.sql:/docker-entrypoint-initdb.d/setup-replication.sql
+    command: >
+      postgres
+      -c wal_level=replica
+      -c max_wal_senders=3
+      -c max_replication_slots=3
+      -c hot_standby=on
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U filesync -d filesync"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis Cluster Node 1
+  redis-1:
+    image: redis:7-alpine
+    container_name: filesync-redis-1
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_1_data:/data
+    command: >
+      redis-server
+      --port 6379
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis Cluster Node 2
+  redis-2:
+    image: redis:7-alpine
+    container_name: filesync-redis-2
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_2_data:/data
+    command: >
+      redis-server
+      --port 6379
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis Cluster Node 3
+  redis-3:
+    image: redis:7-alpine
+    container_name: filesync-redis-3
+    ports:
+      - "6381:6379"
+    volumes:
+      - redis_3_data:/data
+    command: >
+      redis-server
+      --port 6379
+      --cluster-enabled yes
+      --cluster-config-file nodes.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # RabbitMQ Cluster Node 1
+  rabbitmq-1:
+    image: rabbitmq:3-management-alpine
+    container_name: filesync-rabbitmq-1
+    hostname: rabbitmq-1
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_ERLANG_COOKIE: "SWQOKODSQALRPCLNMEQG"
+      RABBITMQ_USE_LONGNAME: "true"
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_1_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # RabbitMQ Cluster Node 2
+  rabbitmq-2:
+    image: rabbitmq:3-management-alpine
+    container_name: filesync-rabbitmq-2
+    hostname: rabbitmq-2
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_ERLANG_COOKIE: "SWQOKODSQALRPCLNMEQG"
+      RABBITMQ_USE_LONGNAME: "true"
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    volumes:
+      - rabbitmq_2_data:/var/lib/rabbitmq
+    depends_on:
+      - rabbitmq-1
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Monitoring stack
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: filesync-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: filesync-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/config/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
+
+volumes:
+  postgres_data:
+  redis_1_data:
+  redis_2_data:
+  redis_3_data:
+  rabbitmq_1_data:
+  rabbitmq_2_data:
+  prometheus_data:
+  grafana_data:

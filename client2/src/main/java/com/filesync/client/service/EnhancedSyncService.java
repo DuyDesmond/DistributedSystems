@@ -8,13 +8,17 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -26,6 +30,7 @@ import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;
 import org.apache.hc.client5.http.impl.classic.HttpClients;
 import org.apache.hc.core5.http.ContentType;
+import org.apache.hc.core5.http.ParseException;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.hc.core5.http.io.entity.StringEntity;
 import org.slf4j.Logger;
@@ -35,16 +40,25 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.filesync.client.config.ClientConfig;
 import com.filesync.common.dto.AuthDto;
+import com.filesync.common.dto.FileChunkDto;
 import com.filesync.common.dto.FileDto;
 import com.filesync.common.dto.SyncEventDto;
 import com.filesync.common.model.VersionVector;
 
 /**
- * Enhanced Synchronization Service with version vector support and real-time WebSocket sync
+ * Enhanced Synchronization Service with version vector support and real-time WebSocket sync and advanced chunking
  */
 public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler {
     
     private static final Logger logger = LoggerFactory.getLogger(EnhancedSyncService.class);
+    
+    // Chunking configuration
+    private static final long CHUNK_SIZE_THRESHOLD = 50 * 1024 * 1024; // 50MB - files larger than this will be chunked
+    private static final long CHUNK_SIZE = 5 * 1024 * 1024; // 5MB per chunk
+    private static final long MIN_CHUNK_SIZE = 1 * 1024 * 1024; // 1MB minimum
+    private static final int MAX_CONCURRENT_CHUNKS = 3; // Maximum parallel chunk uploads
+    private static final int MAX_RETRY_ATTEMPTS = 3;
+    private static final long RETRY_DELAY_MS = 1000; // 1 second base delay
     
     private final ClientConfig config;
     private final DatabaseService databaseService;
@@ -63,6 +77,21 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
     // Adaptive polling intervals based on WebSocket connection status
     private static final int POLLING_INTERVAL_CONNECTED = 300; // 5 minutes when WebSocket connected
     private static final int POLLING_INTERVAL_DISCONNECTED = 30; // 30 seconds when disconnected
+    
+    // Chunking control
+    private final Semaphore chunkUploadSemaphore = new Semaphore(MAX_CONCURRENT_CHUNKS);
+    
+    /**
+     * Simple DTO for chunk upload session response
+     */
+    public static class ChunkUploadSession {
+        private String sessionId;
+        
+        public ChunkUploadSession() {}
+        
+        public String getSessionId() { return sessionId; }
+        public void setSessionId(String sessionId) { this.sessionId = sessionId; }
+    }
     
     /**
      * Calculate SHA-256 checksum of file data
@@ -104,22 +133,10 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         this.objectMapper = new ObjectMapper();
         this.objectMapper.registerModule(new JavaTimeModule());
         this.httpClient = HttpClients.createDefault();
-        this.clientId = generateClientId();
+        this.clientId = config.getClientId(); // Use deterministic client ID from config
         
         startSyncProcessor();
         schedulePeriodicSync();
-    }
-    
-    /**
-     * Generate unique client ID
-     */
-    private String generateClientId() {
-        String existingId = databaseService.getConfig("client_id", null);
-        if (existingId == null) {
-            existingId = UUID.randomUUID().toString();
-            databaseService.setConfig("client_id", existingId);
-        }
-        return existingId;
     }
     
     /**
@@ -231,76 +248,240 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         };
     }
       /**
-     * Upload file implementation
+     * Upload file implementation with chunking support
      */
     private void uploadFile(String filePath) {
-        logger.info("Uploading file: {}", filePath);
-        
         try {
-            Path path = Paths.get(filePath);
-            if (!Files.exists(path) || !Files.isRegularFile(path)) {
-                logger.warn("File does not exist or is not a regular file: {}", filePath);
+            Path file = Paths.get(config.getLocalSyncPath(), filePath);
+            if (!Files.exists(file) || !Files.isRegularFile(file)) {
+                logger.warn("Skipping upload - file not found or not regular: {}", file);
                 return;
             }
             
-            String relativePath = getRelativePath(path);
-            
-            // Check if file is marked as deleted - if so, clear the deletion status for re-upload
-            String currentSyncStatus = databaseService.getSyncStatus(relativePath);
-            if ("DELETED".equals(currentSyncStatus)) {
-                logger.info("File was previously deleted but now exists again. Clearing deletion status and uploading: {}", relativePath);
-                // Clear the DELETED status to allow re-upload
-                databaseService.updateSyncStatus(relativePath, "PENDING");
-            }
-            
-            // Calculate file info
-            byte[] fileData = Files.readAllBytes(path);
-            String checksum = calculateChecksum(fileData);
-            long fileSize = Files.size(path);
-            
-            // Get or create version vector
-            VersionVector versionVector = databaseService.getFileVersionVectorByPath(relativePath);
-            if (versionVector == null) {
-                versionVector = new VersionVector();
-            }
-            versionVector.increment(clientId);
-            
-            // Store version vector locally first
-            String fileId = UUID.randomUUID().toString();
-            databaseService.storeFileVersionVector(fileId, relativePath, versionVector, 
-                LocalDateTime.now(), fileSize, checksum);
-            
-            // Upload to server
-            HttpPost post = new HttpPost(config.getServerUrl() + "/files/upload");
-            post.setHeader("Authorization", "Bearer " + config.getToken());
-            
-            MultipartEntityBuilder builder = MultipartEntityBuilder.create();
-            builder.addBinaryBody("file", fileData, ContentType.APPLICATION_OCTET_STREAM, 
-                path.getFileName().toString());
-            builder.addTextBody("path", relativePath, ContentType.TEXT_PLAIN);
-            builder.addTextBody("clientId", clientId, ContentType.TEXT_PLAIN);
-            builder.addTextBody("versionVector", versionVector.toJson(), ContentType.TEXT_PLAIN);
-            builder.addTextBody("checksum", checksum, ContentType.TEXT_PLAIN);
-            
-            post.setEntity(builder.build());
-            
-            try (CloseableHttpResponse response = httpClient.execute(post)) {
-                if (response.getCode() == 200) {
-                    databaseService.updateSyncStatus(relativePath, "SYNCED");
-                    logger.info("File uploaded successfully: {}", relativePath);
+            // Check if file was recently deleted to prevent race conditions
+            if (isRecentlyDeleted(filePath)) {
+                // Check if file actually exists now - if so, clear deletion and proceed
+                if (Files.exists(file)) {
+                    logger.info("File was previously deleted but now exists again: {}", filePath);
+                    databaseService.clearDeletionStatus(filePath);
                 } else {
-                    String responseBody = EntityUtils.toString(response.getEntity());
-                    logger.error("File upload failed: {} - {}", relativePath, responseBody);
-                    throw new RuntimeException("Upload failed: " + responseBody);
+                    logger.info("Skipping upload of file marked as deleted: {}", filePath);
+                    return;
                 }
             }
             
-        } catch (Exception e) {
-            logger.error("Error uploading file: {}", filePath, e);
-            // Retry logic could be added here
+            long fileSize = Files.size(file);
+            
+            // Use chunked upload for large files
+            if (shouldChunkFile(fileSize)) {
+                uploadFileWithChunking(file, filePath);
+            } else {
+                uploadFileDirectly(file, filePath);
+            }
+            
+        } catch (IOException e) {
+            logger.error("Error uploading file: " + filePath, e);
         }
     }
-
+    
+    /**
+     * Check if file should be chunked based on size
+     */
+    private boolean shouldChunkFile(long fileSize) {
+        return fileSize >= CHUNK_SIZE_THRESHOLD; // Use configured threshold
+    }
+    
+    /**
+     * Upload file using chunking for large files
+     */
+    private void uploadFileWithChunking(Path file, String relativePath) throws IOException {
+        logger.info("Starting chunked upload for large file: {} ({} bytes)", relativePath, Files.size(file));
+        
+        String fileId = UUID.randomUUID().toString();
+        byte[] fileBytes = Files.readAllBytes(file);
+        
+        // Create chunks
+        List<FileChunkDto> chunks = createChunks(fileBytes, fileId);
+        logger.info("Created {} chunks for file: {}", chunks.size(), relativePath);
+        
+        // Initiate chunked upload session
+        String sessionId = initiateChunkedUploadSession(fileId, relativePath, chunks.size(), (long) fileBytes.length);
+        
+        // Upload chunks sequentially
+        for (FileChunkDto chunk : chunks) {
+            uploadChunk(sessionId, chunk);
+            logger.debug("Uploaded chunk {}/{} for file: {}", 
+                chunk.getChunkIndex() + 1, chunks.size(), relativePath);
+        }
+        
+        logger.info("Completed chunked upload for file: {}", relativePath);
+    }
+    
+    /**
+     * Upload file directly for smaller files
+     */
+    private void uploadFileDirectly(Path file, String relativePath) throws IOException {
+        if (!Files.exists(file) || !Files.isRegularFile(file)) {
+            logger.warn("Skipping upload - file not found: {}", file);
+            return;
+        }
+        
+        // Calculate version vector and checksum
+        VersionVector versionVector = databaseService.getFileVersionVector(relativePath);
+        if (versionVector == null) {
+            versionVector = new VersionVector();
+        }
+        versionVector.increment(clientId);
+        
+        byte[] fileData = Files.readAllBytes(file);
+        String checksum = calculateChecksum(fileData);
+        
+        HttpPost post = new HttpPost(config.getServerUrl() + "/files/upload");
+        post.setHeader("Authorization", "Bearer " + config.getToken());
+        
+        MultipartEntityBuilder builder = MultipartEntityBuilder.create();
+        builder.addBinaryBody("file", file.toFile(), ContentType.APPLICATION_OCTET_STREAM, file.getFileName().toString());
+        builder.addTextBody("path", relativePath, ContentType.TEXT_PLAIN);
+        builder.addTextBody("checksum", checksum, ContentType.TEXT_PLAIN);
+        builder.addTextBody("versionVector", objectMapper.writeValueAsString(versionVector), ContentType.APPLICATION_JSON);
+        builder.addTextBody("clientId", clientId, ContentType.TEXT_PLAIN);
+        
+        post.setEntity(builder.build());
+        
+        try (CloseableHttpResponse response = httpClient.execute(post)) {
+            if (response.getCode() == 200) {
+                // Update local database
+                databaseService.updateFileMetadata(relativePath, checksum, Files.size(file), versionVector);
+                databaseService.markFileSynced(relativePath);
+                logger.info("File uploaded successfully: {}", relativePath);
+            } else {
+                String responseBody;
+                try {
+                    responseBody = EntityUtils.toString(response.getEntity());
+                } catch (ParseException e) {
+                    responseBody = "Failed to parse response: " + e.getMessage();
+                }
+                logger.error("File upload failed: {} - {}", relativePath, responseBody);
+            }
+        }
+    }
+    
+    /**
+     * Create chunks from file data
+     */
+    private List<FileChunkDto> createChunks(byte[] fileData, String fileId) {
+        List<FileChunkDto> chunks = new ArrayList<>();
+        long chunkSize = Math.min(CHUNK_SIZE, Math.max(MIN_CHUNK_SIZE, fileData.length / 10)); // Adaptive chunk size
+        int totalChunks = (int) Math.ceil((double) fileData.length / chunkSize);
+        String uploadSessionId = UUID.randomUUID().toString();
+        
+        for (int i = 0; i < totalChunks; i++) {
+            int start = (int) (i * chunkSize);
+            int end = Math.min(start + (int) chunkSize, fileData.length);
+            byte[] chunkData = Arrays.copyOfRange(fileData, start, end);
+            
+            FileChunkDto chunk = new FileChunkDto(fileId, uploadSessionId, i, totalChunks);
+            chunk.setChunkId(UUID.randomUUID().toString());
+            chunk.setChunkData(chunkData);
+            chunk.setChunkChecksum(calculateChecksum(chunkData));
+            chunk.setIsLastChunk(i == totalChunks - 1);
+            
+            chunks.add(chunk);
+        }
+        
+        return chunks;
+    }
+    
+    /**
+     * Initiate chunked upload session on server
+     */
+    private String initiateChunkedUploadSession(String fileId, String filePath, int totalChunks, long totalFileSize) throws IOException {
+        HttpPost post = new HttpPost(config.getServerUrl() + "/files/upload/initiate-chunked");
+        post.setHeader("Authorization", "Bearer " + config.getToken());
+        
+        MultipartEntityBuilder builder = MultipartEntityBuilder.create();
+        builder.addTextBody("fileId", fileId, ContentType.TEXT_PLAIN);
+        builder.addTextBody("filePath", filePath, ContentType.TEXT_PLAIN);
+        builder.addTextBody("totalChunks", String.valueOf(totalChunks), ContentType.TEXT_PLAIN);
+        builder.addTextBody("totalFileSize", String.valueOf(totalFileSize), ContentType.TEXT_PLAIN);
+        
+        post.setEntity(builder.build());
+        
+        try (CloseableHttpResponse response = httpClient.execute(post)) {
+            if (response.getCode() == 200) {
+                String responseBody = EntityUtils.toString(response.getEntity());
+                ChunkUploadSession session = objectMapper.readValue(responseBody, ChunkUploadSession.class);
+                return session.getSessionId();
+            } else {
+                String responseBody = EntityUtils.toString(response.getEntity());
+                throw new IOException("Failed to initiate chunked upload: " + responseBody);
+            }
+        } catch (ParseException e) {
+            throw new IOException("Failed to parse response", e);
+        }
+    }
+    
+    /**
+     * Upload a single chunk to server
+     */
+    private void uploadChunk(String sessionId, FileChunkDto chunk) throws IOException {
+        // Acquire permit for concurrent chunk upload
+        try {
+            chunkUploadSemaphore.acquire();
+            
+            HttpPost post = new HttpPost(config.getServerUrl() + "/files/upload/chunk");
+            post.setHeader("Authorization", "Bearer " + config.getToken());
+            
+            MultipartEntityBuilder builder = MultipartEntityBuilder.create();
+            builder.addTextBody("sessionId", sessionId, ContentType.TEXT_PLAIN);
+            builder.addTextBody("chunkIndex", String.valueOf(chunk.getChunkIndex()), ContentType.TEXT_PLAIN);
+            builder.addBinaryBody("chunkData", chunk.getChunkData(), ContentType.APPLICATION_OCTET_STREAM, "chunk");
+            
+            post.setEntity(builder.build());
+            
+            int attempt = 0;
+            boolean success = false;
+            while (attempt < MAX_RETRY_ATTEMPTS && !success) {
+                try (CloseableHttpResponse response = httpClient.execute(post)) {
+                    if (response.getCode() == 200) {
+                        success = true;
+                    } else {
+                        String responseBody;
+                        try {
+                            responseBody = EntityUtils.toString(response.getEntity());
+                        } catch (ParseException e) {
+                            responseBody = "Failed to parse response: " + e.getMessage();
+                        }
+                        throw new IOException("Chunk upload failed: " + responseBody);
+                    }
+                } catch (IOException e) {
+                    attempt++;
+                    logger.warn("Chunk upload failed, retrying {}/{}: {}", attempt, MAX_RETRY_ATTEMPTS, e.getMessage());
+                    if (attempt < MAX_RETRY_ATTEMPTS) {
+                        // Use exponential backoff without Thread.sleep
+                        long delayMs = RETRY_DELAY_MS * attempt;
+                        try {
+                            Thread.sleep(delayMs);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            throw new IOException("Upload interrupted during retry", ie);
+                        }
+                    }
+                }
+            }
+            
+            if (!success) {
+                throw new IOException("Failed to upload chunk after " + MAX_RETRY_ATTEMPTS + " attempts");
+            }
+            
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Chunk upload interrupted", e);
+        } finally {
+            chunkUploadSemaphore.release();
+        }
+    }
+    
     /**
      * Download file implementation
      */
@@ -360,13 +541,18 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
                     
                     logger.info("File downloaded successfully: {}", filePath);
                 } else {
-                    String responseBody = EntityUtils.toString(response.getEntity());
+                    String responseBody;
+                    try {
+                        responseBody = EntityUtils.toString(response.getEntity());
+                    } catch (ParseException e) {
+                        responseBody = "Failed to parse response: " + e.getMessage();
+                    }
                     logger.error("File download failed with status {}: {} - Response: {}", 
                         response.getCode(), filePath, responseBody);
                 }
             }
             
-        } catch (Exception e) {
+        } catch (IOException e) {
             logger.error("Error downloading file: {} - Exception: {}", filePath, e.getMessage(), e);
         }
     }
@@ -406,12 +592,17 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
                     
                     logger.info("File deleted successfully on server: {}", filePath);
                 } else {
-                    String responseBody = EntityUtils.toString(response.getEntity());
+                    String responseBody;
+                    try {
+                        responseBody = EntityUtils.toString(response.getEntity());
+                    } catch (ParseException e) {
+                        responseBody = "Failed to parse response: " + e.getMessage();
+                    }
                     logger.error("File deletion failed: {} - {}", filePath, responseBody);
                 }
             }
             
-        } catch (Exception e) {
+        } catch (IOException e) {
             logger.error("Error deleting file: {}", filePath, e);
         }
     }
@@ -875,6 +1066,7 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
             // Remove DELETED markers older than 1 hour
             // This gives enough time for all clients to sync the deletion
             LocalDateTime cutoff = LocalDateTime.now().minusHours(1);
+            logger.debug("Cleaning up deleted markers older than: {}", cutoff);
             
             Map<String, String> trackedFiles = databaseService.getAllTrackedFiles();
             for (Map.Entry<String, String> entry : trackedFiles.entrySet()) {
