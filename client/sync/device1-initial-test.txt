@@ -1,0 +1,5 @@
+This is a test file created on Device 1.
+Created at: $(Get-Date)
+Device ID: device-1
+
+This file should sync to Device 2 automatically.

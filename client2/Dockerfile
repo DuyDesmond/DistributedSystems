@@ -14,8 +14,8 @@ COPY pom.xml /app/
 COPY common/ /app/common/
 
 # Copy client pom.xml and source
-COPY client/pom.xml /app/client/
-COPY client/src/ /app/client/src/
+COPY client2/pom.xml /app/client/
+COPY client2/src/ /app/client/src/
 
 # Copy server module
 COPY server/ /app/server/

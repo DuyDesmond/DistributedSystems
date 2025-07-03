@@ -1,0 +1,5 @@
+This is a test file created on Device 2.
+Created at: 2025-06-30
+Device ID: device-2
+
+This file should sync to Device 1 automatically.
