@@ -330,7 +330,23 @@ public class MainController {
         alert.showAndWait();
     }
     
-    private void appendLog(String message) {
+    /**
+     * Show conflict notification to user
+     */
+    public void showConflictNotification(String filePath) {
+        Platform.runLater(() -> {
+            Alert alert = new Alert(Alert.AlertType.INFORMATION);
+            alert.setTitle("File Conflict Detected");
+            alert.setHeaderText("Conflict detected for file: " + filePath);
+            alert.setContentText("A conflict resolution dialog will be shown automatically. " +
+                               "Please resolve the conflict to continue synchronization.");
+            alert.show();
+            
+            appendLog("Conflict detected for file: " + filePath);
+        });
+    }
+    
+    public void appendLog(String message) {
         if (logArea != null) {
             Platform.runLater(() -> {
                 logArea.appendText(java.time.LocalTime.now() + ": " + message + "\n");

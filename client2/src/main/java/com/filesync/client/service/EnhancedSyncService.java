@@ -22,6 +22,8 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import javafx.application.Platform;
+
 import org.apache.hc.client5.http.classic.methods.HttpDelete;
 import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
@@ -39,6 +41,9 @@ import org.slf4j.LoggerFactory;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.filesync.client.config.ClientConfig;
+import com.filesync.client.service.DatabaseService;
+import com.filesync.client.service.ConflictManager;
+import com.filesync.client.ui.ConflictResolutionController;
 import com.filesync.common.dto.AuthDto;
 import com.filesync.common.dto.FileChunkDto;
 import com.filesync.common.dto.FileDto;
@@ -80,6 +85,9 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
     
     // Chunking control
     private final Semaphore chunkUploadSemaphore = new Semaphore(MAX_CONCURRENT_CHUNKS);
+    
+    // Conflict management
+    private ConflictManager conflictManager;
     
     /**
      * Simple DTO for chunk upload session response
@@ -134,6 +142,9 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         this.objectMapper.registerModule(new JavaTimeModule());
         this.httpClient = HttpClients.createDefault();
         this.clientId = config.getClientId(); // Use deterministic client ID from config
+        
+        // Initialize conflict manager
+        this.conflictManager = new ConflictManager(this, config);
         
         startSyncProcessor();
         schedulePeriodicSync();
@@ -614,9 +625,21 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         logger.info("Resolving conflict for: {}", filePath);
         
         try {
-            // For now, implement a simple Last-Write-Wins strategy
-            // In a full implementation, this would involve user interaction
+            // Use ConflictManager for coordinated UI-based conflict resolution
+            conflictManager.handleConflict(filePath);
             
+        } catch (Exception e) {
+            logger.error("Error resolving conflict for: {}", filePath, e);
+            // Fallback to simple Last-Write-Wins strategy
+            fallbackConflictResolution(filePath);
+        }
+    }
+    
+    /**
+     * Fallback conflict resolution using Last-Write-Wins strategy
+     */
+    private void fallbackConflictResolution(String filePath) {
+        try {
             // Get local file info
             Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
             if (!Files.exists(localPath)) {
@@ -633,7 +656,7 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
             }
             
         } catch (Exception e) {
-            logger.error("Error resolving conflict for: {}", filePath, e);
+            logger.error("Error in fallback conflict resolution for: {}", filePath, e);
         }
     }
 
@@ -1217,16 +1240,11 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         logger.warn("Conflict detected for file: {} - {}", event.getFilePath(), event.getEventType());
         
         try {
-            // Log the conflict and could trigger UI notification
+            // Log the conflict and trigger UI-based resolution
             logger.info("Conflict resolution needed for: {} - checksum: {}", 
                        event.getFilePath(), event.getChecksum());
             
-            // In a more advanced implementation, you could:
-            // 1. Show user notification
-            // 2. Create conflict resolution UI  
-            // 3. Automatically resolve using Last-Write-Wins strategy
-            
-            // For now, queue the file for conflict resolution (download with conflict handling)
+            // Queue the file for conflict resolution with UI integration
             queueFileSync(event.getFilePath(), SyncOperation.CONFLICT_RESOLVE);
             
         } catch (Exception e) {
@@ -1290,5 +1308,116 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
                 logger.error("Failed to initialize WebSocket client", e);
             }
         }
+    }
+    
+    /**
+     * Download file content for conflict resolution without saving to disk
+     */
+    public FileDto downloadFileContent(String filePath) throws IOException {
+        if (!isAuthenticated()) {
+            throw new RuntimeException("User not authenticated");
+        }
+        
+        String fileId = findFileIdByPath(filePath);
+        if (fileId == null) {
+            throw new RuntimeException("File not found on server: " + filePath);
+        }
+        
+        String downloadUrl = config.getServerUrl() + "/files/" + fileId + "/download";
+        HttpGet get = new HttpGet(downloadUrl);
+        get.setHeader("Authorization", "Bearer " + config.getToken());
+        
+        try (CloseableHttpResponse response = httpClient.execute(get)) {
+            if (response.getCode() == 200) {
+                byte[] content = EntityUtils.toByteArray(response.getEntity());
+                
+                // Create FileDto with content
+                FileDto fileDto = new FileDto();
+                fileDto.setFileId(fileId);
+                fileDto.setFilePath(filePath);
+                fileDto.setContent(content);
+                fileDto.setChecksum(calculateChecksum(content));
+                fileDto.setFileSize((long) content.length);
+                
+                return fileDto;
+            } else {
+                throw new RuntimeException("Failed to download file: " + response.getCode());
+            }
+        }
+    }
+
+    /**
+     * Resolve conflict implementation with UI integration
+     */
+    private void resolveConflictWithUI(String filePath) {
+        logger.info("Starting UI-based conflict resolution for: {}", filePath);
+        
+        Platform.runLater(() -> {
+            try {
+                ConflictResolutionController.ConflictResolutionResult result = 
+                    ConflictResolutionController.showConflictDialog(this, config, filePath);
+                
+                switch (result) {
+                    case USE_LOCAL -> {
+                        // Upload local version
+                        uploadResolvedFile(filePath);
+                        logger.info("Conflict resolved: using local version for {}", filePath);
+                    }
+                    case USE_SERVER -> {
+                        // Download server version
+                        queueFileSync(filePath, SyncOperation.DOWNLOAD);
+                        logger.info("Conflict resolved: using server version for {}", filePath);
+                    }
+                    case USE_MERGED -> {
+                        // Upload the merged version (already saved to local file)
+                        uploadResolvedFile(filePath);
+                        logger.info("Conflict resolved: using merged version for {}", filePath);
+                    }
+                    case CANCELLED -> {
+                        logger.info("Conflict resolution cancelled for {}", filePath);
+                    }
+                }
+            } catch (Exception e) {
+                logger.error("Error in conflict resolution UI for: {}", filePath, e);
+                // Fallback to automatic resolution
+                fallbackConflictResolution(filePath);
+            }
+        });
+    }
+    
+    /**
+     * Upload resolved conflict file to server
+     */
+    public void uploadResolvedFile(String filePath) {
+        try {
+            Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
+            if (!Files.exists(localPath)) {
+                logger.warn("Resolved file does not exist: {}", filePath);
+                return;
+            }
+            
+            // Upload the resolved file
+            uploadFile(localPath.toString());
+            logger.info("Successfully uploaded resolved file: {}", filePath);
+            
+        } catch (Exception e) {
+            logger.error("Error uploading resolved file: {}", filePath, e);
+        }
+    }
+    
+    /**
+     * Set the main controller for conflict notifications
+     */
+    public void setMainController(com.filesync.client.ui.MainController mainController) {
+        if (conflictManager != null) {
+            conflictManager.setMainController(mainController);
+        }
+    }
+    
+    /**
+     * Get the conflict manager
+     */
+    public ConflictManager getConflictManager() {
+        return conflictManager;
     }
 }

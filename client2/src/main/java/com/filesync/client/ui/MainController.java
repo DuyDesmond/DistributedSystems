@@ -62,6 +62,9 @@ public class MainController {
         this.fileWatchService = fileWatchService;
         this.config = config;
         
+        // Set this controller in the sync service for conflict notifications
+        syncService.setMainController(this);
+        
         setupUI();
         updateUIState();
     }
@@ -330,11 +333,27 @@ public class MainController {
         alert.showAndWait();
     }
     
-    private void appendLog(String message) {
+    public void appendLog(String message) {
         if (logArea != null) {
             Platform.runLater(() -> {
                 logArea.appendText(java.time.LocalTime.now() + ": " + message + "\n");
             });
         }
+    }
+    
+    /**
+     * Show conflict notification to user
+     */
+    public void showConflictNotification(String filePath) {
+        Platform.runLater(() -> {
+            Alert alert = new Alert(Alert.AlertType.INFORMATION);
+            alert.setTitle("File Conflict Detected");
+            alert.setHeaderText("Conflict detected for file: " + filePath);
+            alert.setContentText("A conflict resolution dialog will be shown automatically. " +
+                               "Please resolve the conflict to continue synchronization.");
+            alert.show();
+            
+            appendLog("Conflict detected for file: " + filePath);
+        });
     }
 }

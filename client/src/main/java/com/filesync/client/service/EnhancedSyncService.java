@@ -81,6 +81,9 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
     // Chunking control
     private final Semaphore chunkUploadSemaphore = new Semaphore(MAX_CONCURRENT_CHUNKS);
     
+    // Conflict management
+    private ConflictManager conflictManager;
+    
     /**
      * Simple DTO for chunk upload session response
      */
@@ -134,6 +137,9 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         this.objectMapper.registerModule(new JavaTimeModule());
         this.httpClient = HttpClients.createDefault();
         this.clientId = config.getClientId(); // Use deterministic client ID from config
+        
+        // Initialize conflict manager
+        this.conflictManager = new ConflictManager(this, config);
         
         startSyncProcessor();
         schedulePeriodicSync();
@@ -614,9 +620,21 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         logger.info("Resolving conflict for: {}", filePath);
         
         try {
-            // For now, implement a simple Last-Write-Wins strategy
-            // In a full implementation, this would involve user interaction
+            // Use ConflictManager for coordinated UI-based conflict resolution
+            conflictManager.handleConflict(filePath);
             
+        } catch (Exception e) {
+            logger.error("Error resolving conflict for: {}", filePath, e);
+            // Fallback to simple Last-Write-Wins strategy
+            fallbackConflictResolution(filePath);
+        }
+    }
+    
+    /**
+     * Fallback conflict resolution using Last-Write-Wins strategy
+     */
+    private void fallbackConflictResolution(String filePath) {
+        try {
             // Get local file info
             Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
             if (!Files.exists(localPath)) {
@@ -633,7 +651,7 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
             }
             
         } catch (Exception e) {
-            logger.error("Error resolving conflict for: {}", filePath, e);
+            logger.error("Error in fallback conflict resolution for: {}", filePath, e);
         }
     }
 
@@ -983,312 +1001,50 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
     }
 
     /**
-     * Upload external file by copying it to sync directory first
+     * Download file content for conflict resolution without saving to disk
      */
-    public void uploadExternalFile(Path externalFile, String targetRelativePath) throws IOException {
+    public FileDto downloadFileContent(String filePath) throws IOException {
         if (!isAuthenticated()) {
-            throw new IllegalStateException("Cannot upload file - user not authenticated");
+            throw new RuntimeException("User not authenticated");
         }
         
-        // Validate external file
-        if (!Files.exists(externalFile) || !Files.isRegularFile(externalFile)) {
-            throw new IllegalArgumentException("Invalid file: " + externalFile);
+        String fileId = findFileIdByPath(filePath);
+        if (fileId == null) {
+            throw new RuntimeException("File not found on server: " + filePath);
         }
         
-        // Validate target path (security check - no parent directory traversal)
-        if (targetRelativePath.contains("..") || targetRelativePath.startsWith("/") || targetRelativePath.startsWith("\\")) {
-            throw new IllegalArgumentException("Invalid target path: " + targetRelativePath);
-        }
+        String downloadUrl = config.getServerUrl() + "/files/" + fileId + "/download";
+        HttpGet get = new HttpGet(downloadUrl);
+        get.setHeader("Authorization", "Bearer " + config.getToken());
         
-        // Create target path in sync directory
-        Path syncRoot = Paths.get(config.getLocalSyncPath());
-        Path targetPath = syncRoot.resolve(targetRelativePath).normalize();
-        
-        // Ensure target is still within sync directory (security check)
-        if (!targetPath.startsWith(syncRoot)) {
-            throw new IllegalArgumentException("Target path outside sync directory: " + targetRelativePath);
-        }
-        
-        // Ensure target directory exists
-        Files.createDirectories(targetPath.getParent());
-        
-        // Copy file to sync directory
-        Files.copy(externalFile, targetPath, StandardCopyOption.REPLACE_EXISTING);
-        
-        // Queue for normal sync
-        queueFileSync(targetPath.toString(), SyncOperation.UPLOAD);
-        
-        logger.info("External file copied and queued for sync: {} -> {}", 
-                   externalFile, targetRelativePath);
-    }
-
-    /**
-     * Upload external file with automatic filename (convenience method)
-     */
-    public void uploadExternalFile(Path externalFile) throws IOException {
-        String fileName = externalFile.getFileName().toString();
-        uploadExternalFile(externalFile, fileName);
-    }
-    
-    /**
-     * Mark file as deleted with timestamp to avoid re-sync
-     */
-    private void markFileAsDeleted(String filePath) {
-        try {
-            // Mark as deleted in database
-            databaseService.updateSyncStatus(filePath, "DELETED");
-            
-            logger.debug("Marked file as deleted: {}", filePath);
-        } catch (Exception e) {
-            logger.error("Error marking file as deleted: " + filePath, e);
-        }
-    }
-    
-    /**
-     * Check if a file was recently deleted to avoid immediate re-sync
-     */
-    private boolean isRecentlyDeleted(String filePath) {
-        try {
-            String syncStatus = databaseService.getSyncStatus(filePath);
-            return "DELETED".equals(syncStatus);
-        } catch (Exception e) {
-            logger.error("Error checking deletion status: " + filePath, e);
-            return false;
-        }
-    }
-    
-    /**
-     * Clean up old DELETED markers periodically
-     * This prevents the database from growing indefinitely with old deletion markers
-     */
-    private void cleanupOldDeletedMarkers() {
-        try {
-            // Remove DELETED markers older than 1 hour
-            // This gives enough time for all clients to sync the deletion
-            LocalDateTime cutoff = LocalDateTime.now().minusHours(1);
-            logger.debug("Cleaning up deleted markers older than: {}", cutoff);
-            
-            Map<String, String> trackedFiles = databaseService.getAllTrackedFiles();
-            for (Map.Entry<String, String> entry : trackedFiles.entrySet()) {
-                String filePath = entry.getKey();
-                String syncStatus = entry.getValue();
+        try (CloseableHttpResponse response = httpClient.execute(get)) {
+            if (response.getCode() == 200) {
+                byte[] content = EntityUtils.toByteArray(response.getEntity());
                 
-                if ("DELETED".equals(syncStatus)) {
-                    // Check if the file still doesn't exist on server
-                    // and if enough time has passed, remove the marker
-                    // For now, we'll implement a simple time-based cleanup
-                    // In a more sophisticated version, you could store timestamps
-                    
-                    // Remove the DELETED marker after some time to prevent database bloat
-                    // Only if file doesn't exist locally and isn't on server
-                    Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
-                    if (!Files.exists(localPath)) {
-                        databaseService.removeFileRecord(filePath);
-                        logger.debug("Cleaned up old DELETED marker for: {}", filePath);
-                    }
-                }
-            }
-        } catch (Exception e) {
-            logger.error("Error cleaning up old deleted markers", e);
-        }
-    }
-    
-    /**
-     * Clear deletion status and re-upload a previously deleted file
-     * This is useful when a user wants to upload a file with the same name/path that was previously deleted
-     */
-    public void clearDeletionAndUpload(String filePath) {
-        if (!isAuthenticated()) {
-            logger.warn("Cannot upload file - user not authenticated");
-            return;
-        }
-        
-        try {
-            Path path = Paths.get(config.getLocalSyncPath(), filePath);
-            if (!Files.exists(path) || !Files.isRegularFile(path)) {
-                logger.warn("File does not exist: {}", filePath);
-                return;
-            }
-            
-            String relativePath = getRelativePath(path);
-            
-            // Clear any existing deletion status
-            String currentSyncStatus = databaseService.getSyncStatus(relativePath);
-            if ("DELETED".equals(currentSyncStatus)) {
-                logger.info("Clearing deletion status for file: {}", relativePath);
-                databaseService.updateSyncStatus(relativePath, "PENDING");
-            }
-            
-            // Queue for upload
-            queueFileSync(relativePath, SyncOperation.UPLOAD);
-            
-        } catch (Exception e) {
-            logger.error("Error clearing deletion status and uploading file: {}", filePath, e);
-        }
-    }
-    
-    /**
-     * Clear deletion status for a file without uploading
-     * This allows the file to be synced normally if it appears again
-     */
-    public void clearDeletionStatus(String filePath) {
-        try {
-            String relativePath = getRelativePath(Paths.get(filePath));
-            String currentSyncStatus = databaseService.getSyncStatus(relativePath);
-            
-            if ("DELETED".equals(currentSyncStatus)) {
-                logger.info("Clearing deletion status for file: {}", relativePath);
-                databaseService.updateSyncStatus(relativePath, "PENDING");
+                // Create FileDto with content
+                FileDto fileDto = new FileDto();
+                fileDto.setFileId(fileId);
+                fileDto.setFilePath(filePath);
+                fileDto.setContent(content);
+                fileDto.setChecksum(calculateChecksum(content));
+                fileDto.setFileSize((long) content.length);
+                
+                return fileDto;
             } else {
-                logger.info("File is not marked as deleted: {}", relativePath);
+                throw new RuntimeException("Failed to download file: " + response.getCode());
             }
-            
-        } catch (Exception e) {
-            logger.error("Error clearing deletion status for file: {}", filePath, e);
         }
     }
     
     /**
-     * Log all available files on server for debugging purposes
+     * Set the main controller for conflict notifications
      */
-    private void logAvailableFiles() {
-        try {
-            String listFilesUrl = config.getServerUrl() + "/files/";
-            HttpGet get = new HttpGet(listFilesUrl);
-            get.setHeader("Authorization", "Bearer " + config.getToken());
-            
-            logger.debug("Requesting file list from server for debugging: {}", listFilesUrl);
-            
-            try (CloseableHttpResponse response = httpClient.execute(get)) {
-                if (response.getCode() == 200) {
-                    String responseBody = EntityUtils.toString(response.getEntity());
-                    FileDto[] files = objectMapper.readValue(responseBody, FileDto[].class);
-                    logger.info("Available files on server ({} total):", files.length);
-                    for (FileDto file : files) {
-                        logger.info("  - Path: '{}', ID: '{}', Name: '{}'", 
-                            file.getFilePath(), file.getFileId(), file.getFileName());
-                    }
-                } else {
-                    String responseBody = EntityUtils.toString(response.getEntity());
-                    logger.error("Failed to get file list for debugging. Status: {}, Response: {}", 
-                        response.getCode(), responseBody);
-                }
-            }
-        } catch (Exception e) {
-            logger.error("Error logging available files for debugging", e);
-        }
-    }
-
-    // WebSocket Event Handler Implementation
-    @Override
-    public void handleFileChangeEvent(SyncEventDto event) {
-        logger.info("Received real-time file change: {} for {}", event.getEventType(), event.getFilePath());
-        
-        try {
-            // Don't process events from our own client
-            if (clientId.equals(event.getClientId())) {
-                logger.debug("Ignoring event from our own client: {}", event.getClientId());
-                return;
-            }
-            
-            String eventType = event.getEventType();
-            
-            switch (eventType) {
-                case "CREATE":
-                case "MODIFY":
-                    // Download the file that was created/modified
-                    logger.info("Queuing download for real-time event: {}", event.getFilePath());
-                    queueFileSync(event.getFilePath(), SyncOperation.DOWNLOAD);
-                    break;
-                case "DELETE":
-                    // Mark the file as deleted locally  
-                    handleRemoteFileDeletion(event.getFilePath());
-                    break;
-                default:
-                    logger.warn("Unknown event type: {}", eventType);
-            }
-        } catch (Exception e) {
-            logger.error("Error handling file change event: {}", event, e);
-        }
-    }
-    
-    @Override
-    public void handleConflictEvent(SyncEventDto event) {
-        logger.warn("Conflict detected for file: {} - {}", event.getFilePath(), event.getEventType());
-        
-        try {
-            // Log the conflict and could trigger UI notification
-            logger.info("Conflict resolution needed for: {} - checksum: {}", 
-                       event.getFilePath(), event.getChecksum());
-            
-            // In a more advanced implementation, you could:
-            // 1. Show user notification
-            // 2. Create conflict resolution UI  
-            // 3. Automatically resolve using Last-Write-Wins strategy
-            
-            // For now, queue the file for conflict resolution (download with conflict handling)
-            queueFileSync(event.getFilePath(), SyncOperation.CONFLICT_RESOLVE);
-            
-        } catch (Exception e) {
-            logger.error("Error handling conflict event: {}", event, e);
-        }
-    }
-    
-    @Override
-    public void handleConnectionStatusChange(boolean connected) {
-        webSocketConnected.set(connected);
-        
-        if (connected) {
-            logger.info("WebSocket connected - switching to real-time sync mode");
-            // Update WebSocket client with current auth token if needed
-            if (webSocketClient != null && config.getToken() != null) {
-                webSocketClient.updateAuthToken(config.getToken());
-            }
-        } else {
-            logger.warn("WebSocket disconnected - relying on polling mode");
-        }
-        
-        // Adjust polling frequency based on WebSocket status
-        adjustPollingFrequency();
-    }
-    
-    // Helper methods for WebSocket event handling
-    private void handleRemoteFileDeletion(String filePath) {
-        try {
-            Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
-            
-            if (Files.exists(localPath)) {
-                Files.delete(localPath);
-                logger.info("Deleted file from real-time event: {}", filePath);
-            }
-            
-            // Mark as deleted in database to prevent re-download
-            markFileAsDeleted(filePath);
-            
-        } catch (Exception e) {
-            logger.error("Error handling remote file deletion: {}", filePath, e);
-        }
-    }
-    
-    private void adjustPollingFrequency() {
-        // This would require restructuring the periodic sync scheduling
-        // For now, just log the change
-        int newInterval = webSocketConnected.get() ? POLLING_INTERVAL_CONNECTED : POLLING_INTERVAL_DISCONNECTED;
-        logger.info("Adjusting polling frequency to {} seconds based on WebSocket status", newInterval);
-    }
-    
-    /**
-     * Initialize WebSocket client for real-time sync
-     */
-    private void initializeWebSocketClient() {
-        if (config.getToken() != null && !config.getToken().isEmpty()) {
-            try {
-                webSocketClient = new WebSocketSyncClient(config, this, executorService);
-                webSocketClient.connect();
-                logger.info("WebSocket client initialized and connecting...");
-            } catch (Exception e) {
-                logger.error("Failed to initialize WebSocket client", e);
-            }
+    public void setMainController(com.filesync.client.ui.MainController mainController) {
+        if (conflictManager != null) {
+            conflictManager.setMainController(mainController);
         }
     }
 }
+
+
+    
