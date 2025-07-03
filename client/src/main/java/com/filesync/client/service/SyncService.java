@@ -8,6 +8,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
@@ -26,11 +27,13 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.filesync.client.config.ClientConfig;
 import com.filesync.common.dto.AuthDto;
 import com.filesync.common.dto.FileDto;
+import com.filesync.common.dto.SyncEventDto;
 
 /**
  * Synchronization Service for handling file sync with server
+ * Now supports both polling and event-driven real-time sync
  */
-public class SyncService {
+public class SyncService implements WebSocketSyncClient.SyncEventHandler {
     
     private static final Logger logger = LoggerFactory.getLogger(SyncService.class);
     
@@ -42,6 +45,14 @@ public class SyncService {
     private final BlockingQueue<SyncTask> syncQueue = new LinkedBlockingQueue<>();
     private boolean running = false;
     
+    // WebSocket support for real-time sync
+    private WebSocketSyncClient webSocketClient;
+    private final AtomicBoolean webSocketConnected = new AtomicBoolean(false);
+    
+    // Adaptive polling intervals based on WebSocket connection status
+    private static final int POLLING_INTERVAL_CONNECTED = 300; // 5 minutes when WebSocket connected
+    private static final int POLLING_INTERVAL_DISCONNECTED = 30; // 30 seconds when disconnected
+    
     public SyncService(ClientConfig config, ScheduledExecutorService executorService) {
         this.config = config;
         this.executorService = executorService;
@@ -50,6 +61,149 @@ public class SyncService {
         this.httpClient = HttpClients.createDefault();
         
         startSyncProcessor();
+    }
+    
+    // WebSocket Event Handler implementation
+    @Override
+    public void handleFileChangeEvent(SyncEventDto event) {
+        logger.info("Received real-time file change: {} for {}", event.getEventType(), event.getFilePath());
+        
+        try {
+            // Don't process events from our own client
+            if (config.getClientId().equals(event.getClientId())) {
+                logger.debug("Ignoring event from our own client: {}", event.getClientId());
+                return;
+            }
+            
+            String eventType = event.getEventType();
+            
+            switch (eventType) {
+                case "CREATE":
+                case "MODIFY":
+                    // Download the file that was created/modified
+                    downloadFileFromEvent(event);
+                    break;
+                case "DELETE":
+                    // Delete the local file
+                    deleteLocalFileFromEvent(event);
+                    break;
+                default:
+                    logger.warn("Unknown event type: {}", eventType);
+            }
+        } catch (Exception e) {
+            logger.error("Error handling file change event: {}", event, e);
+        }
+    }
+    
+    @Override
+    public void handleConflictEvent(SyncEventDto event) {
+        logger.warn("Conflict detected for file: {} - {}", event.getFilePath(), event.getEventType());
+        
+        try {
+            // For now, just log the conflict
+            // In a more advanced implementation, you could:
+            // 1. Show user notification
+            // 2. Create conflict resolution UI
+            // 3. Automatically resolve using Last-Write-Wins strategy
+            
+            logger.info("Conflict resolution needed for: {}", event.getFilePath());
+            // Could trigger UI notification here
+            
+        } catch (Exception e) {
+            logger.error("Error handling conflict event: {}", event, e);
+        }
+    }
+    
+    @Override
+    public void handleConnectionStatusChange(boolean connected) {
+        webSocketConnected.set(connected);
+        
+        if (connected) {
+            logger.info("WebSocket connected - switching to real-time sync mode");
+            // Update WebSocket client with current auth token
+            if (webSocketClient != null) {
+                webSocketClient.updateAuthToken(config.getToken());
+            }
+        } else {
+            logger.warn("WebSocket disconnected - falling back to polling mode");
+        }
+        
+        // Adjust polling frequency based on WebSocket status
+        adjustPollingFrequency();
+    }
+    
+    // Helper methods for WebSocket event handling
+    private void downloadFileFromEvent(SyncEventDto event) {
+        try {
+            Path localPath = Paths.get(config.getLocalSyncPath(), event.getFilePath());
+            
+            // Find the file ID by path (simplified - in production use proper mapping)
+            String fileId = findFileIdByPath(event.getFilePath());
+            if (fileId != null) {
+                downloadFile(fileId, localPath);
+                logger.info("Downloaded file from real-time event: {}", event.getFilePath());
+            } else {
+                logger.warn("Could not find file ID for path: {}", event.getFilePath());
+            }
+        } catch (Exception e) {
+            logger.error("Error downloading file from event: {}", event.getFilePath(), e);
+        }
+    }
+    
+    private void deleteLocalFileFromEvent(SyncEventDto event) {
+        try {
+            Path localPath = Paths.get(config.getLocalSyncPath(), event.getFilePath());
+            if (Files.exists(localPath)) {
+                Files.delete(localPath);
+                logger.info("Deleted file from real-time event: {}", event.getFilePath());
+            }
+        } catch (Exception e) {
+            logger.error("Error deleting file from event: {}", event.getFilePath(), e);
+        }
+    }
+    
+    private String findFileIdByPath(String filePath) {
+        // This is a simplified implementation
+        // In production, you'd want to maintain a local mapping or query the server
+        try {
+            HttpGet get = new HttpGet(config.getServerUrl() + "/files/");
+            get.setHeader("Authorization", "Bearer " + config.getToken());
+            
+            try (CloseableHttpResponse response = httpClient.execute(get)) {
+                if (response.getCode() == 200) {
+                    String responseBody = EntityUtils.toString(response.getEntity());
+                    FileDto[] files = objectMapper.readValue(responseBody, FileDto[].class);
+                    
+                    for (FileDto file : files) {
+                        if (file.getFilePath().equals(filePath)) {
+                            return file.getFileId();
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Error finding file ID for path: {}", filePath, e);
+        }
+        return null;
+    }
+    
+    private void adjustPollingFrequency() {
+        // This would require restructuring the periodic sync scheduling
+        // For now, just log the change
+        int newInterval = webSocketConnected.get() ? POLLING_INTERVAL_CONNECTED : POLLING_INTERVAL_DISCONNECTED;
+        logger.info("Adjusting polling frequency to {} seconds", newInterval);
+    }
+    
+    private void initializeWebSocketClient() {
+        if (config.getToken() != null && !config.getToken().isEmpty()) {
+            try {
+                webSocketClient = new WebSocketSyncClient(config, this, executorService);
+                webSocketClient.connect();
+                logger.info("WebSocket client initialized and connecting...");
+            } catch (Exception e) {
+                logger.error("Failed to initialize WebSocket client", e);
+            }
+        }
     }
     
     public boolean login(String username, String password) {
@@ -76,6 +230,10 @@ public class SyncService {
                     config.saveConfig();
                     
                     logger.info("Login successful for user: {}", username);
+                    
+                    // Initialize WebSocket client for real-time sync
+                    initializeWebSocketClient();
+                    
                     return true;
                 } else {
                     logger.error("Login failed: {}", responseBody);
@@ -315,6 +473,12 @@ public class SyncService {
     
     public void stop() {
         running = false;
+        
+        // Shutdown WebSocket client
+        if (webSocketClient != null) {
+            webSocketClient.shutdown();
+        }
+        
         try {
             httpClient.close();
         } catch (IOException e) {

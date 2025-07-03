@@ -20,6 +20,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.hc.client5.http.classic.methods.HttpDelete;
 import org.apache.hc.client5.http.classic.methods.HttpGet;
@@ -41,12 +42,13 @@ import com.filesync.client.config.ClientConfig;
 import com.filesync.common.dto.AuthDto;
 import com.filesync.common.dto.FileChunkDto;
 import com.filesync.common.dto.FileDto;
+import com.filesync.common.dto.SyncEventDto;
 import com.filesync.common.model.VersionVector;
 
 /**
- * Enhanced Synchronization Service with version vector support and advanced chunking
+ * Enhanced Synchronization Service with version vector support and real-time WebSocket sync and advanced chunking
  */
-public class EnhancedSyncService {
+public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler {
     
     private static final Logger logger = LoggerFactory.getLogger(EnhancedSyncService.class);
     
@@ -67,6 +69,14 @@ public class EnhancedSyncService {
     
     private final BlockingQueue<SyncTask> syncQueue = new LinkedBlockingQueue<>();
     private volatile boolean running = false;
+    
+    // WebSocket support for real-time sync
+    private WebSocketSyncClient webSocketClient;
+    private final AtomicBoolean webSocketConnected = new AtomicBoolean(false);
+    
+    // Adaptive polling intervals based on WebSocket connection status
+    private static final int POLLING_INTERVAL_CONNECTED = 300; // 5 minutes when WebSocket connected
+    private static final int POLLING_INTERVAL_DISCONNECTED = 30; // 30 seconds when disconnected
     
     // Chunking control
     private final Semaphore chunkUploadSemaphore = new Semaphore(MAX_CONCURRENT_CHUNKS);
@@ -215,6 +225,15 @@ public class EnhancedSyncService {
      */
     private boolean isAuthenticated() {
         return config.getToken() != null && !config.getToken().isEmpty();
+    }
+    
+    /**
+     * Initialize WebSocket client for real-time sync when user is authenticated
+     */
+    public void initializeWebSocketSync() {
+        if (isAuthenticated() && webSocketClient == null) {
+            initializeWebSocketClient();
+        }
     }
     
     /**
@@ -469,21 +488,46 @@ public class EnhancedSyncService {
     private void downloadFile(String filePath) {
         logger.info("Downloading file: {}", filePath);
         
+        // Check authentication first
+        if (!isAuthenticated()) {
+            logger.warn("Cannot download file - user not authenticated: {}", filePath);
+            return;
+        }
+        
         try {
             String fileId = findFileIdByPath(filePath);
             if (fileId == null) {
-                logger.warn("Could not find file ID for path: {}", filePath);
+                logger.error("File not found on server: {}. This may indicate:", filePath);
+                logger.error("  1. File was never uploaded to server");
+                logger.error("  2. File path mismatch between client and server");
+                logger.error("  3. File belongs to different user");
+                logger.error("  4. Database inconsistency on server");
+                logAvailableFiles();
+                
+                // Attempt to upload the file if it exists locally
+                Path localFilePath = Paths.get(config.getLocalSyncPath(), filePath);
+                if (Files.exists(localFilePath)) {
+                    logger.info("File exists locally, attempting to upload: {}", filePath);
+                    queueFileSync(filePath, SyncOperation.UPLOAD);
+                }
                 return;
             }
             
-            HttpGet get = new HttpGet(config.getServerUrl() + "/files/" + fileId + "/download");
+            logger.debug("Found file ID {} for path: {}", fileId, filePath);
+            
+            String downloadUrl = config.getServerUrl() + "/files/" + fileId + "/download";
+            HttpGet get = new HttpGet(downloadUrl);
             get.setHeader("Authorization", "Bearer " + config.getToken());
             
+            logger.debug("Sending download request to: {}", downloadUrl);
+            
             try (CloseableHttpResponse response = httpClient.execute(get)) {
+                logger.debug("Download response code: {} for file: {}", response.getCode(), filePath);
+                
                 if (response.getCode() == 200) {
                     Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
                     Files.createDirectories(localPath.getParent());
-                    Files.copy(response.getEntity().getContent(), localPath);
+                    Files.copy(response.getEntity().getContent(), localPath, StandardCopyOption.REPLACE_EXISTING);
                     
                     // Update local database
                     byte[] fileData = Files.readAllBytes(localPath);
@@ -503,12 +547,13 @@ public class EnhancedSyncService {
                     } catch (ParseException e) {
                         responseBody = "Failed to parse response: " + e.getMessage();
                     }
-                    logger.error("File download failed: {} - {}", filePath, responseBody);
+                    logger.error("File download failed with status {}: {} - Response: {}", 
+                        response.getCode(), filePath, responseBody);
                 }
             }
             
         } catch (IOException e) {
-            logger.error("Error downloading file: {}", filePath, e);
+            logger.error("Error downloading file: {} - Exception: {}", filePath, e.getMessage(), e);
         }
     }
 
@@ -727,23 +772,38 @@ public class EnhancedSyncService {
      */
     private String findFileIdByPath(String relativePath) {
         try {
-            HttpGet get = new HttpGet(config.getServerUrl() + "/files/");
+            String listFilesUrl = config.getServerUrl() + "/files/";
+            HttpGet get = new HttpGet(listFilesUrl);
             get.setHeader("Authorization", "Bearer " + config.getToken());
             
+            logger.debug("Requesting file list from server: {}", listFilesUrl);
+            
             try (CloseableHttpResponse response = httpClient.execute(get)) {
+                logger.debug("File list response code: {}", response.getCode());
+                
                 if (response.getCode() == 200) {
                     String responseBody = EntityUtils.toString(response.getEntity());
+                    logger.debug("File list response body length: {}", responseBody.length());
+                    
                     FileDto[] files = objectMapper.readValue(responseBody, FileDto[].class);
+                    logger.debug("Found {} files from server", files.length);
                     
                     for (FileDto file : files) {
+                        logger.debug("Server file: {} -> {}", file.getFilePath(), file.getFileId());
                         if (file.getFilePath().equals(relativePath)) {
+                            logger.debug("Found matching file ID: {} for path: {}", file.getFileId(), relativePath);
                             return file.getFileId();
                         }
                     }
+                    logger.warn("No matching file found on server for path: {}", relativePath);
+                } else {
+                    String responseBody = EntityUtils.toString(response.getEntity());
+                    logger.error("Failed to get file list from server. Status: {}, Response: {}", 
+                        response.getCode(), responseBody);
                 }
             }
         } catch (Exception e) {
-            logger.error("Error finding file ID for path: {}", relativePath, e);
+            logger.error("Error finding file ID for path: {} - Exception: {}", relativePath, e.getMessage(), e);
         }
         return null;
     }
@@ -885,10 +945,16 @@ public class EnhancedSyncService {
     }
     
     /**
-     * Stop the sync service
+     * Stop the sync service and cleanup resources
      */
     public void stop() {
         running = false;
+        
+        // Shutdown WebSocket client
+        if (webSocketClient != null) {
+            webSocketClient.shutdown();
+        }
+        
         try {
             httpClient.close();
         } catch (IOException e) {
@@ -965,7 +1031,7 @@ public class EnhancedSyncService {
     }
     
     /**
-     * Mark file as deleted with timestamp to avoid re-download
+     * Mark file as deleted with timestamp to avoid re-sync
      */
     private void markFileAsDeleted(String filePath) {
         try {
@@ -1079,6 +1145,150 @@ public class EnhancedSyncService {
             
         } catch (Exception e) {
             logger.error("Error clearing deletion status for file: {}", filePath, e);
+        }
+    }
+    
+    /**
+     * Log all available files on server for debugging purposes
+     */
+    private void logAvailableFiles() {
+        try {
+            String listFilesUrl = config.getServerUrl() + "/files/";
+            HttpGet get = new HttpGet(listFilesUrl);
+            get.setHeader("Authorization", "Bearer " + config.getToken());
+            
+            logger.debug("Requesting file list from server for debugging: {}", listFilesUrl);
+            
+            try (CloseableHttpResponse response = httpClient.execute(get)) {
+                if (response.getCode() == 200) {
+                    String responseBody = EntityUtils.toString(response.getEntity());
+                    FileDto[] files = objectMapper.readValue(responseBody, FileDto[].class);
+                    logger.info("Available files on server ({} total):", files.length);
+                    for (FileDto file : files) {
+                        logger.info("  - Path: '{}', ID: '{}', Name: '{}'", 
+                            file.getFilePath(), file.getFileId(), file.getFileName());
+                    }
+                } else {
+                    String responseBody = EntityUtils.toString(response.getEntity());
+                    logger.error("Failed to get file list for debugging. Status: {}, Response: {}", 
+                        response.getCode(), responseBody);
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Error logging available files for debugging", e);
+        }
+    }
+
+    // WebSocket Event Handler Implementation
+    @Override
+    public void handleFileChangeEvent(SyncEventDto event) {
+        logger.info("Received real-time file change: {} for {}", event.getEventType(), event.getFilePath());
+        
+        try {
+            // Don't process events from our own client
+            if (clientId.equals(event.getClientId())) {
+                logger.debug("Ignoring event from our own client: {}", event.getClientId());
+                return;
+            }
+            
+            String eventType = event.getEventType();
+            
+            switch (eventType) {
+                case "CREATE":
+                case "MODIFY":
+                    // Download the file that was created/modified
+                    logger.info("Queuing download for real-time event: {}", event.getFilePath());
+                    queueFileSync(event.getFilePath(), SyncOperation.DOWNLOAD);
+                    break;
+                case "DELETE":
+                    // Mark the file as deleted locally  
+                    handleRemoteFileDeletion(event.getFilePath());
+                    break;
+                default:
+                    logger.warn("Unknown event type: {}", eventType);
+            }
+        } catch (Exception e) {
+            logger.error("Error handling file change event: {}", event, e);
+        }
+    }
+    
+    @Override
+    public void handleConflictEvent(SyncEventDto event) {
+        logger.warn("Conflict detected for file: {} - {}", event.getFilePath(), event.getEventType());
+        
+        try {
+            // Log the conflict and could trigger UI notification
+            logger.info("Conflict resolution needed for: {} - checksum: {}", 
+                       event.getFilePath(), event.getChecksum());
+            
+            // In a more advanced implementation, you could:
+            // 1. Show user notification
+            // 2. Create conflict resolution UI  
+            // 3. Automatically resolve using Last-Write-Wins strategy
+            
+            // For now, queue the file for conflict resolution (download with conflict handling)
+            queueFileSync(event.getFilePath(), SyncOperation.CONFLICT_RESOLVE);
+            
+        } catch (Exception e) {
+            logger.error("Error handling conflict event: {}", event, e);
+        }
+    }
+    
+    @Override
+    public void handleConnectionStatusChange(boolean connected) {
+        webSocketConnected.set(connected);
+        
+        if (connected) {
+            logger.info("WebSocket connected - switching to real-time sync mode");
+            // Update WebSocket client with current auth token if needed
+            if (webSocketClient != null && config.getToken() != null) {
+                webSocketClient.updateAuthToken(config.getToken());
+            }
+        } else {
+            logger.warn("WebSocket disconnected - relying on polling mode");
+        }
+        
+        // Adjust polling frequency based on WebSocket status
+        adjustPollingFrequency();
+    }
+    
+    // Helper methods for WebSocket event handling
+    private void handleRemoteFileDeletion(String filePath) {
+        try {
+            Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
+            
+            if (Files.exists(localPath)) {
+                Files.delete(localPath);
+                logger.info("Deleted file from real-time event: {}", filePath);
+            }
+            
+            // Mark as deleted in database to prevent re-download
+            markFileAsDeleted(filePath);
+            
+        } catch (Exception e) {
+            logger.error("Error handling remote file deletion: {}", filePath, e);
+        }
+    }
+    
+    private void adjustPollingFrequency() {
+        // This would require restructuring the periodic sync scheduling
+        // For now, just log the change
+        int newInterval = webSocketConnected.get() ? POLLING_INTERVAL_CONNECTED : POLLING_INTERVAL_DISCONNECTED;
+        logger.info("Adjusting polling frequency to {} seconds based on WebSocket status", newInterval);
+    }
+    
+    /**
+     * Initialize WebSocket client for real-time sync
+     */
+    private void initializeWebSocketClient() {
+        if (config.getToken() != null && !config.getToken().isEmpty()) {
+            try {
+                webSocketClient = new WebSocketSyncClient(config, this, executorService);
+                webSocketClient.connect();
+                logger.info("WebSocket client initialized and connecting...");
+            } catch (Exception e) {
+                logger.error("Failed to initialize WebSocket client", e);
+            }
         }
     }
 }
