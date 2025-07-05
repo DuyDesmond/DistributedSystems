@@ -1256,10 +1256,8 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         
         if (connected) {
             logger.info("WebSocket connected - switching to real-time sync mode");
-            // Update WebSocket client with current auth token if needed
-            if (webSocketClient != null && config.getToken() != null) {
-                webSocketClient.updateAuthToken(config.getToken());
-            }
+            // No need to update auth token here - the connection was already established with the current token
+            // The updateAuthToken method should only be called when the token actually changes
         } else {
             logger.warn("WebSocket disconnected - relying on polling mode");
         }

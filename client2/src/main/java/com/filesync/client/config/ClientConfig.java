@@ -4,16 +4,21 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Properties;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Client Configuration
  */
 public class ClientConfig {
     
+    private static final Logger logger = LoggerFactory.getLogger(ClientConfig.class);
     private static final String CONFIG_FILE = "client.properties";
     private Properties properties;
     
@@ -33,25 +38,44 @@ public class ClientConfig {
     }
     
     private void loadConfig() {
-        try (FileInputStream fis = new FileInputStream(CONFIG_FILE)) {
-            properties.load(fis);
+        try {
+            // Check if client.properties exists as a directory (Docker volume issue)
+            Path configPath = Paths.get(CONFIG_FILE);
+            if (Files.isDirectory(configPath)) {
+                logger.warn("client.properties exists as directory, cannot load config. Using defaults.");
+                saveConfig();
+                return;
+            }
             
-            serverUrl = properties.getProperty("server.url", serverUrl);
-            localSyncPath = properties.getProperty("sync.path", localSyncPath);
-            clientId = properties.getProperty("client.id", clientId);
-            username = properties.getProperty("user.username", username);
-            token = properties.getProperty("auth.token", token);
-            refreshToken = properties.getProperty("auth.refresh_token", refreshToken);
-            syncInterval = Integer.parseInt(properties.getProperty("sync.interval", String.valueOf(syncInterval)));
-            
+            try (FileInputStream fis = new FileInputStream(CONFIG_FILE)) {
+                properties.load(fis);
+                
+                serverUrl = properties.getProperty("server.url", serverUrl);
+                localSyncPath = properties.getProperty("sync.path", localSyncPath);
+                clientId = properties.getProperty("client.id", clientId);
+                username = properties.getProperty("user.username", username);
+                token = properties.getProperty("auth.token", token);
+                refreshToken = properties.getProperty("auth.refresh_token", refreshToken);
+                syncInterval = Integer.parseInt(properties.getProperty("sync.interval", String.valueOf(syncInterval)));
+                
+                logger.info("Configuration loaded successfully");
+            }
         } catch (IOException e) {
             // Config file doesn't exist, use defaults
+            logger.info("No configuration file found, using defaults");
             saveConfig();
         }
     }
     
     public void saveConfig() {
         try {
+            // Check if client.properties exists as a directory and remove it
+            Path configPath = Paths.get(CONFIG_FILE);
+            if (Files.isDirectory(configPath)) {
+                logger.warn("client.properties exists as directory, removing it to create config file");
+                Files.delete(configPath);
+            }
+            
             properties.setProperty("server.url", serverUrl);
             properties.setProperty("sync.path", localSyncPath);
             properties.setProperty("client.id", clientId);
@@ -62,9 +86,10 @@ public class ClientConfig {
             
             try (FileOutputStream fos = new FileOutputStream(CONFIG_FILE)) {
                 properties.store(fos, "File Sync Client Configuration");
+                logger.info("Configuration saved successfully");
             }
         } catch (IOException e) {
-            System.err.println("Failed to save configuration: " + e.getMessage());
+            logger.error("Failed to save configuration: {}", e.getMessage());
         }
     }
     

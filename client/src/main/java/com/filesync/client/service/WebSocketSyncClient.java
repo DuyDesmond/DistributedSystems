@@ -1,6 +1,7 @@
 package com.filesync.client.service;
 
 import java.net.URI;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -165,7 +166,7 @@ public class WebSocketSyncClient extends WebSocketClient {
         return "SUBSCRIBE\n" +
                "id:sub-" + System.currentTimeMillis() + "\n" +
                "destination:" + destination + "\n" +
-               "\n\n\0";
+               "\n" + '\0';
     }
     
     /**
@@ -199,7 +200,7 @@ public class WebSocketSyncClient extends WebSocketClient {
                                         "destination:/app/heartbeat\n" +
                                         "content-type:application/json\n" +
                                         "\n" +
-                                        objectMapper.writeValueAsString(heartbeat) + "\n\0";
+                                        objectMapper.writeValueAsString(heartbeat) + "\n" + '\0';
                 
                 send(heartbeatMessage);
                 logger.debug("Sent heartbeat");
@@ -239,21 +240,42 @@ public class WebSocketSyncClient extends WebSocketClient {
      * Update authentication token
      */
     public void updateAuthToken(String token) {
-        // Close current connection and reconnect with new token
-        if (connected.get()) {
-            close();
-        }
+        logger.info("Updating auth token");
         
-        // Update headers and reconnect
+        // Update headers first
         clearHeaders();
         if (token != null && !token.isEmpty()) {
             addHeader("Authorization", "Bearer " + token);
         }
         
-        try {
-            reconnect();
-        } catch (Exception e) {
-            logger.error("Failed to reconnect with new token", e);
+        // If we're currently connected, we need to reconnect to apply the new token
+        // However, if this is being called from the WebSocket thread (like in onOpen), 
+        // we need to do the reconnection asynchronously to avoid IllegalStateException
+        if (connected.get()) {
+            // Check if we're in the WebSocket thread by checking the thread name
+            String threadName = Thread.currentThread().getName();
+            if (threadName.contains("WebSocket") || threadName.contains("Java-WebSocket")) {
+                
+                logger.debug("Detected WebSocket thread - scheduling async reconnect");
+                // Schedule reconnection on a separate thread
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        Thread.sleep(100); // Small delay to ensure onOpen completes
+                        close();
+                        reconnect();
+                    } catch (Exception e) {
+                        logger.error("Failed to reconnect with new token (async)", e);
+                    }
+                });
+            } else {
+                // Safe to reconnect immediately
+                try {
+                    close();
+                    reconnect();
+                } catch (Exception e) {
+                    logger.error("Failed to reconnect with new token", e);
+                }
+            }
         }
     }
     
