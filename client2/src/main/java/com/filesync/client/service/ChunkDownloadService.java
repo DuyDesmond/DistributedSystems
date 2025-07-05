@@ -34,8 +34,8 @@ public class ChunkDownloadService {
     private static final Logger logger = LoggerFactory.getLogger(ChunkDownloadService.class);
     
     // Download configuration
-    private static final long CHUNK_SIZE_THRESHOLD = 50 * 1024 * 1024; // 50MB - files larger than this will be chunked
-    private static final long CHUNK_SIZE = 5 * 1024 * 1024; // 5MB per chunk
+    private static final long CHUNK_SIZE_THRESHOLD = 5 * 1024 * 1024; // 5MB - files larger than this will be chunked
+    private static final long CHUNK_SIZE =  1024 * 1024; // 1MB per chunk
     private static final int MAX_CONCURRENT_DOWNLOADS = 3; // Maximum parallel chunk downloads
     private static final int MAX_RETRY_ATTEMPTS = 3;
     private static final long RETRY_DELAY_MS = 1000; // 1 second base delay

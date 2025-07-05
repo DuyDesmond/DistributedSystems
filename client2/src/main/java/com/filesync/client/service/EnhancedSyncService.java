@@ -56,8 +56,8 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
     private static final Logger logger = LoggerFactory.getLogger(EnhancedSyncService.class);
     
     // Chunking configuration
-    private static final long CHUNK_SIZE_THRESHOLD = 50 * 1024 * 1024; // 50MB - files larger than this will be chunked
-    private static final long CHUNK_SIZE = 5 * 1024 * 1024; // 5MB per chunk
+    private static final long CHUNK_SIZE_THRESHOLD = 5 * 1024 * 1024; // 50MB - files larger than this will be chunked
+    private static final long CHUNK_SIZE =  1024 * 1024; // 1MB per chunk
     private static final long MIN_CHUNK_SIZE = 1 * 1024 * 1024; // 1MB minimum
     private static final int MAX_CONCURRENT_CHUNKS = 3; // Maximum parallel chunk uploads
     private static final int MAX_RETRY_ATTEMPTS = 3;
