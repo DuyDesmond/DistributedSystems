@@ -1037,22 +1037,39 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
             throw new IllegalArgumentException("Invalid file: " + externalFile);
         }
         
-        // Validate target path (security check - no parent directory traversal)
-        if (targetRelativePath.contains("..") || targetRelativePath.startsWith("/") || targetRelativePath.startsWith("\\")) {
+        // Clean and normalize the target path
+        String cleanPath = targetRelativePath.trim();
+        
+        // Convert backslashes to forward slashes for consistent checking
+        String normalizedPath = cleanPath.replace("\\", "/");
+        
+        // Remove any leading slashes
+        while (normalizedPath.startsWith("/")) {
+            normalizedPath = normalizedPath.substring(1);
+        }
+        
+        // Validate path (security check - no parent directory traversal)
+        if (normalizedPath.contains("..") || normalizedPath.isEmpty()) {
             throw new IllegalArgumentException("Invalid target path: " + targetRelativePath);
         }
         
+        // Use the normalized path for the rest of the operation
+        targetRelativePath = normalizedPath;
+        
         // Create target path in sync directory
-        Path syncRoot = Paths.get(config.getLocalSyncPath());
+        Path syncRoot = Paths.get(config.getLocalSyncPath()).toAbsolutePath().normalize();
         Path targetPath = syncRoot.resolve(targetRelativePath).normalize();
         
         // Ensure target is still within sync directory (security check)
         if (!targetPath.startsWith(syncRoot)) {
-            throw new IllegalArgumentException("Target path outside sync directory: " + targetRelativePath);
+            throw new IllegalArgumentException("Target path outside sync directory: " + targetRelativePath + 
+                " (resolved to: " + targetPath + ", sync root: " + syncRoot + ")");
         }
         
         // Ensure target directory exists
-        Files.createDirectories(targetPath.getParent());
+        if (targetPath.getParent() != null) {
+            Files.createDirectories(targetPath.getParent());
+        }
         
         // Copy file to sync directory
         Files.copy(externalFile, targetPath, StandardCopyOption.REPLACE_EXISTING);
