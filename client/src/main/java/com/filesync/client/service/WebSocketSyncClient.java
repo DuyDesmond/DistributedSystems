@@ -80,8 +80,11 @@ public class WebSocketSyncClient extends WebSocketClient {
         connected.set(true);
         logger.info("WebSocket connection established. Status: {}", handshake.getHttpStatus());
         
-        // Subscribe to file changes and conflicts
-        subscribeToChannels();
+        // Send STOMP CONNECT frame first
+        sendStompConnect();
+        
+        // Don't subscribe immediately - wait for CONNECTED response
+        // subscribeToChannels() will be called when we receive CONNECTED frame
         
         // Notify handler about connection status
         eventHandler.handleConnectionStatusChange(true);
@@ -92,7 +95,20 @@ public class WebSocketSyncClient extends WebSocketClient {
         logger.debug("Received WebSocket message: {}", message);
         
         try {
-            // Parse STOMP frame
+            // Handle STOMP CONNECTED frame
+            if (message.startsWith("CONNECTED")) {
+                logger.info("Received STOMP CONNECTED frame - subscribing to channels");
+                subscribeToChannels();
+                return;
+            }
+            
+            // Handle STOMP ERROR frame
+            if (message.startsWith("ERROR")) {
+                logger.error("Received STOMP ERROR frame: {}", message);
+                return;
+            }
+            
+            // Parse STOMP MESSAGE frame
             if (message.startsWith("MESSAGE")) {
                 String[] lines = message.split("\n");
                 String body = null;
@@ -160,13 +176,35 @@ public class WebSocketSyncClient extends WebSocketClient {
     }
     
     /**
+     * Send STOMP CONNECT frame
+     */
+    private void sendStompConnect() {
+        try {
+            String connectFrame = "CONNECT\n" +
+                                 "accept-version:1.0,1.1,1.2\n" +
+                                 "host:" + getURI().getHost() + "\n";
+            
+            if (config.getToken() != null && !config.getToken().isEmpty()) {
+                connectFrame += "Authorization:Bearer " + config.getToken() + "\n";
+            }
+            
+            connectFrame += "\n";
+            
+            send(connectFrame);
+            logger.debug("Sent STOMP CONNECT frame");
+        } catch (Exception e) {
+            logger.error("Error sending STOMP CONNECT frame", e);
+        }
+    }
+    
+    /**
      * Create STOMP subscription message
      */
     private String createSubscriptionMessage(String destination) {
         return "SUBSCRIBE\n" +
                "id:sub-" + System.currentTimeMillis() + "\n" +
                "destination:" + destination + "\n" +
-               "\n" + '\0';
+               "\n";
     }
     
     /**

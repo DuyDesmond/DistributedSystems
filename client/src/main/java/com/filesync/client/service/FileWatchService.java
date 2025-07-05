@@ -45,6 +45,9 @@ public class FileWatchService {
             // Start watching in a separate thread
             executorService.submit(this::watchForChanges);
             
+            // Perform initial scan of existing files after a short delay to allow sync service to be ready
+            executorService.schedule(this::performInitialScan, 3, TimeUnit.SECONDS);
+            
             logger.info("File watch service started for path: {}", config.getLocalSyncPath());
             
         } catch (IOException e) {
@@ -130,14 +133,22 @@ public class FileWatchService {
             return;
         }
         
+        // Check if sync service is ready and authenticated
+        if (!syncService.isLoggedIn()) {
+            logger.warn("File change detected but user not authenticated: {} - {}", kind.name(), filePath);
+            return;
+        }
+        
         // Queue the sync operation
         executorService.submit(() -> {
             try {
                 if (kind == StandardWatchEventKinds.ENTRY_CREATE || kind == StandardWatchEventKinds.ENTRY_MODIFY) {
                     if (Files.isRegularFile(filePath)) {
+                        logger.info("Queuing file for upload: {}", filePath);
                         syncService.queueFileForUpload(filePath);
                     }
                 } else if (kind == StandardWatchEventKinds.ENTRY_DELETE) {
+                    logger.info("Queuing file for deletion: {}", filePath);
                     syncService.queueFileForDeletion(filePath);
                 }
             } catch (Exception e) {
@@ -148,5 +159,60 @@ public class FileWatchService {
     
     public boolean isRunning() {
         return running;
+    }
+    
+    /**
+     * Perform initial scan of sync directory to queue existing files for upload
+     */
+    private void performInitialScan() {
+        if (!running) {
+            return;
+        }
+        
+        logger.info("Starting initial scan of sync directory...");
+        
+        // Check if sync service is ready and authenticated
+        if (!syncService.isLoggedIn()) {
+            logger.warn("Initial scan skipped - user not authenticated. Please login first.");
+            return;
+        }
+        
+        try {
+            Path syncPath = Paths.get(config.getLocalSyncPath());
+            
+            Files.walkFileTree(syncPath, new SimpleFileVisitor<Path>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                    if (attrs.isRegularFile()) {
+                        // Skip temporary files and hidden files
+                        String fileName = file.getFileName().toString();
+                        if (!fileName.startsWith(".") && !fileName.endsWith(".tmp") && !fileName.endsWith("~")) {
+                            logger.debug("Queuing existing file for upload: {}", file);
+                            
+                            // Queue the file for upload
+                            executorService.submit(() -> {
+                                try {
+                                    syncService.queueFileForUpload(file);
+                                } catch (Exception e) {
+                                    logger.error("Error queuing existing file for upload: " + file, e);
+                                }
+                            });
+                        }
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+                
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exc) throws IOException {
+                    logger.warn("Failed to visit file during initial scan: {}", file, exc);
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+            
+            logger.info("Initial scan completed");
+            
+        } catch (IOException e) {
+            logger.error("Error during initial scan of sync directory", e);
+        }
     }
 }

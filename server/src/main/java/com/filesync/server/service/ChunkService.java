@@ -29,6 +29,7 @@ import com.filesync.server.entity.UserEntity;
 import com.filesync.server.repository.ChunkUploadSessionRepository;
 import com.filesync.server.repository.FileRepository;
 import com.filesync.server.repository.UserRepository;
+import com.filesync.server.util.StoragePathUtil;
 
 /**
  * Service for handling chunked file uploads
@@ -331,8 +332,7 @@ public class ChunkService {
     }
     
     private String createStoragePath(String userId, String fileId) {
-        return Paths.get(storageBasePath, "chunks", userId.substring(0, 2), 
-                        userId.substring(2, 4), fileId).toString();
+        return StoragePathUtil.createStoragePath(storageBasePath, userId, fileId);
     }
     
     private void saveFileToStorage(byte[] data, String storagePath) throws IOException {

@@ -1,6 +1,8 @@
 package com.filesync.client.ui;
 
 import java.io.File;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 
 import com.filesync.client.config.ClientConfig;
 import com.filesync.client.service.EnhancedSyncService;
@@ -61,6 +63,9 @@ public class MainController {
         this.syncService = syncService;
         this.fileWatchService = fileWatchService;
         this.config = config;
+        
+        // Set this controller in the sync service for conflict notifications
+        syncService.setMainController(this);
         
         setupUI();
         updateUIState();
@@ -258,13 +263,16 @@ public class MainController {
             
             // Check if file is already within sync directory
             if (filePath.startsWith(syncDir)) {
-                // File is already in sync directory - use existing logic
+                // File is already in sync directory - get relative path and use existing logic
                 uploadFileButton.setDisable(true);
                 uploadFileButton.setText("Uploading...");
                 
                 new Thread(() -> {
                     try {
-                        syncService.queueFileForUpload(selectedFile.toPath());
+                        // Convert absolute path to relative path for sync directory
+                        Path syncPath = Paths.get(syncDir);
+                        Path relativePath = syncPath.relativize(selectedFile.toPath());
+                        syncService.queueFileSync(relativePath.toString(), com.filesync.client.service.EnhancedSyncService.SyncOperation.UPLOAD);
                         
                         Platform.runLater(() -> {
                             uploadFileButton.setDisable(false);
@@ -330,6 +338,14 @@ public class MainController {
         alert.showAndWait();
     }
     
+    public void appendLog(String message) {
+        if (logArea != null) {
+            Platform.runLater(() -> {
+                logArea.appendText(java.time.LocalTime.now() + ": " + message + "\n");
+            });
+        }
+    }
+    
     /**
      * Show conflict notification to user
      */
@@ -344,13 +360,5 @@ public class MainController {
             
             appendLog("Conflict detected for file: " + filePath);
         });
-    }
-    
-    public void appendLog(String message) {
-        if (logArea != null) {
-            Platform.runLater(() -> {
-                logArea.appendText(java.time.LocalTime.now() + ": " + message + "\n");
-            });
-        }
     }
 }

@@ -872,7 +872,8 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
             logger.error("Cannot upload file - user not authenticated. Please login first: {}", filePath);
             return;
         }
-        queueFileSync(filePath.toString(), SyncOperation.UPLOAD);
+        String relativePath = getRelativePath(filePath);
+        queueFileSync(relativePath, SyncOperation.UPLOAD);
     }
     
     /**
@@ -1056,8 +1057,8 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         // Copy file to sync directory
         Files.copy(externalFile, targetPath, StandardCopyOption.REPLACE_EXISTING);
         
-        // Queue for normal sync
-        queueFileSync(targetPath.toString(), SyncOperation.UPLOAD);
+        // Queue for normal sync using relative path
+        queueFileSync(targetRelativePath, SyncOperation.UPLOAD);
         
         logger.info("External file copied and queued for sync: {} -> {}", 
                    externalFile, targetRelativePath);

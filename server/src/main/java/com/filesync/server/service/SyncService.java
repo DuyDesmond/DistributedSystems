@@ -1,19 +1,28 @@
 package com.filesync.server.service;
 
-import com.filesync.common.dto.SyncEventDto;
-import com.filesync.common.model.VersionVector;
-import com.filesync.server.controller.SyncWebSocketController;
-import com.filesync.server.entity.*;
-import com.filesync.server.repository.*;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.filesync.common.dto.SyncEventDto;
+import com.filesync.common.model.VersionVector;
+import com.filesync.server.controller.SyncWebSocketController;
+import com.filesync.server.entity.FileEntity;
+import com.filesync.server.entity.FileVersionEntity;
+import com.filesync.server.entity.SyncEventEntity;
+import com.filesync.server.entity.UserEntity;
+import com.filesync.server.repository.FileRepository;
+import com.filesync.server.repository.FileVersionRepository;
+import com.filesync.server.repository.SyncEventRepository;
+import com.filesync.server.repository.UserRepository;
+import com.filesync.server.util.StoragePathUtil;
 
 /**
  * Service for handling advanced synchronization logic with version vectors
@@ -37,6 +46,9 @@ public class SyncService {
     
     @Autowired
     private SyncWebSocketController webSocketController;
+    
+    @Value("${filesync.storage.base-path:/app/storage}")
+    private String storageBasePath;
     
     /**
      * Process file sync request with conflict detection
@@ -277,16 +289,15 @@ public class SyncService {
      * Generate storage path for file
      */
     private String generateStoragePath(FileEntity file) {
-        return String.format("storage/users/%s/files/%s", 
-                            file.getUser().getUserId(), file.getFileId());
+        return StoragePathUtil.createStoragePath(storageBasePath, file.getUser().getUserId(), file.getFileId());
     }
     
     /**
      * Generate conflict storage path
      */
     private String generateConflictStoragePath(FileEntity file, String clientId) {
-        return String.format("storage/users/%s/conflicts/%s_%s_%s", 
-                            file.getUser().getUserId(), file.getFileId(), clientId, System.currentTimeMillis());
+        return StoragePathUtil.createConflictStoragePath(storageBasePath, file.getUser().getUserId(), 
+                                                       file.getFileId(), clientId, LocalDateTime.now());
     }
     
     /**

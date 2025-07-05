@@ -146,6 +146,13 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         
         startSyncProcessor();
         schedulePeriodicSync();
+        
+        // If user is already authenticated, initialize sync and perform initial scan
+        if (isAuthenticated()) {
+            logger.info("User already authenticated at startup - initializing sync");
+            initializeWebSocketSync();
+            executorService.schedule(this::performInitialDirectoryScan, 5, TimeUnit.SECONDS);
+        }
     }
     
     /**
@@ -210,7 +217,7 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
     public void queueFileSync(String filePath, SyncOperation operation) {
         syncQueue.offer(new SyncTask(filePath, operation));
         databaseService.addToSyncQueue(filePath, operation.name(), getPriority(operation));
-        logger.debug("Queued file for sync: {} ({})", filePath, operation);
+        logger.info("Queued file for sync: {} ({})", filePath, operation);
     }
     
     /**
@@ -233,7 +240,11 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
      * Check if user is authenticated
      */
     private boolean isAuthenticated() {
-        return config.getToken() != null && !config.getToken().isEmpty();
+        boolean authenticated = config.getToken() != null && !config.getToken().isEmpty();
+        if (!authenticated) {
+            logger.debug("User not authenticated - token: {}", config.getToken() == null ? "null" : "empty");
+        }
+        return authenticated;
     }
     
     /**
@@ -260,6 +271,8 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
      * Upload file implementation with chunking support
      */
     private void uploadFile(String filePath) {
+        logger.info("Starting upload for file: {}", filePath);
+        
         try {
             Path file = Paths.get(config.getLocalSyncPath(), filePath);
             if (!Files.exists(file) || !Files.isRegularFile(file)) {
@@ -856,10 +869,11 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
      */
     public void queueFileForUpload(Path filePath) {
         if (!isAuthenticated()) {
-            logger.warn("Cannot upload file - user not authenticated");
+            logger.error("Cannot upload file - user not authenticated. Please login first: {}", filePath);
             return;
         }
-        queueFileSync(filePath.toString(), SyncOperation.UPLOAD);
+        String relativePath = getRelativePath(filePath);
+        queueFileSync(relativePath, SyncOperation.UPLOAD);
     }
     
     /**
@@ -868,7 +882,7 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
      */
     public void queueFileForDeletion(Path filePath) {
         if (!isAuthenticated()) {
-            logger.warn("Cannot delete file - user not authenticated");
+            logger.error("Cannot delete file - user not authenticated. Please login first: {}", filePath);
             return;
         }
         
@@ -953,6 +967,13 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
                     config.saveConfig();
                     
                     logger.info("Login successful for user: {}", username);
+                    
+                    // Initialize WebSocket sync after successful authentication
+                    initializeWebSocketSync();
+                    
+                    // Perform initial directory scan to detect existing untracked files
+                    executorService.schedule(this::performInitialDirectoryScan, 2, TimeUnit.SECONDS);
+                    
                     return true;
                 } else {
                     logger.error("Login failed: {}", responseBody);
@@ -1036,8 +1057,8 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         // Copy file to sync directory
         Files.copy(externalFile, targetPath, StandardCopyOption.REPLACE_EXISTING);
         
-        // Queue for normal sync
-        queueFileSync(targetPath.toString(), SyncOperation.UPLOAD);
+        // Queue for normal sync using relative path
+        queueFileSync(targetRelativePath, SyncOperation.UPLOAD);
         
         logger.info("External file copied and queued for sync: {} -> {}", 
                    externalFile, targetRelativePath);
@@ -1415,5 +1436,71 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
      */
     public ConflictManager getConflictManager() {
         return conflictManager;
+    }
+
+    /**
+     * Perform initial scan of sync directory to queue existing untracked files for upload
+     * This ensures files that existed before the client started are uploaded
+     */
+    public void performInitialDirectoryScan() {
+        if (!isAuthenticated()) {
+            logger.debug("Skipping initial directory scan - user not authenticated");
+            return;
+        }
+        
+        logger.info("Starting initial directory scan for untracked files");
+        
+        try {
+            Path syncRoot = Paths.get(config.getLocalSyncPath());
+            if (!Files.exists(syncRoot) || !Files.isDirectory(syncRoot)) {
+                logger.warn("Sync directory does not exist: {}", syncRoot);
+                return;
+            }
+            
+            logger.info("Scanning directory: {}", syncRoot);
+            
+            // Count total files found using atomic integers
+            java.util.concurrent.atomic.AtomicInteger totalFiles = new java.util.concurrent.atomic.AtomicInteger(0);
+            java.util.concurrent.atomic.AtomicInteger trackedFiles = new java.util.concurrent.atomic.AtomicInteger(0);
+            java.util.concurrent.atomic.AtomicInteger untrackedFiles = new java.util.concurrent.atomic.AtomicInteger(0);
+            
+            // Walk through all files in sync directory
+            Files.walk(syncRoot)
+                .filter(Files::isRegularFile)
+                .forEach(filePath -> {
+                    try {
+                        String relativePath = getRelativePath(filePath);
+                        logger.debug("Processing file: {} -> {}", filePath, relativePath);
+                        
+                        // Check if file is already tracked in database
+                        String syncStatus = databaseService.getSyncStatus(relativePath);
+                        
+                        if (syncStatus == null) {
+                            // File is not tracked - queue it for upload
+                            logger.info("Found untracked file during initial scan: {}", relativePath);
+                            queueFileSync(filePath.toString(), SyncOperation.UPLOAD);
+                            untrackedFiles.incrementAndGet();
+                        } else if ("DELETED".equals(syncStatus)) {
+                            // File was previously deleted but now exists again - clear deletion and upload
+                            logger.info("Found previously deleted file during initial scan: {}", relativePath);
+                            clearDeletionAndUpload(filePath.toString());
+                            untrackedFiles.incrementAndGet();
+                        } else {
+                            // File is already tracked
+                            logger.debug("File already tracked during initial scan: {} (status: {})", relativePath, syncStatus);
+                            trackedFiles.incrementAndGet();
+                        }
+                        totalFiles.incrementAndGet();
+                    } catch (Exception e) {
+                        logger.error("Error processing file during initial scan: {}", filePath, e);
+                    }
+                });
+            
+            logger.info("Initial directory scan completed - Total files: {}, Tracked: {}, Untracked: {}", 
+                       totalFiles.get(), trackedFiles.get(), untrackedFiles.get());
+            
+        } catch (Exception e) {
+            logger.error("Error during initial directory scan", e);
+        }
     }
 }

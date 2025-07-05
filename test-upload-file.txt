@@ -1,0 +1,2 @@
+This is a test file to test the upload functionality.
+The file upload from client should work now after fixing the path issue.

@@ -23,6 +23,7 @@ import com.filesync.server.entity.FileEntity;
 import com.filesync.server.entity.UserEntity;
 import com.filesync.server.repository.FileRepository;
 import com.filesync.server.repository.UserRepository;
+import com.filesync.server.util.StoragePathUtil;
 
 import jakarta.servlet.http.HttpServletResponse;
 
@@ -201,19 +202,7 @@ public class FileService {
     }
     
     private String createStoragePath(String userId, String fileId) {
-        // Create storage structure: /storage/{userId}/{year}/{month}/{fileId}
-        LocalDateTime now = LocalDateTime.now();
-        String year = String.valueOf(now.getYear());
-        String month = String.format("%02d", now.getMonthValue());
-        
-        Path userPath = Paths.get(storageBasePath, userId, year, month);
-        try {
-            Files.createDirectories(userPath);
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to create storage directory", e);
-        }
-        
-        return userPath.resolve(fileId).toString();
+        return StoragePathUtil.createStoragePath(storageBasePath, userId, fileId);
     }
     
     private void saveFileToStorage(byte[] data, String storagePath) throws IOException {
