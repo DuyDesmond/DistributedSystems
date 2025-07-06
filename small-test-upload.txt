@@ -1,0 +1,4 @@
+This is a small test file to verify basic upload functionality works.
+Created: 2025-07-06
+Size: Small enough to not trigger chunking (under 5MB).
+Content: Testing basic file sync functionality.

@@ -18,7 +18,8 @@ import jakarta.validation.constraints.NotBlank;
 public class VersionVector {
     
     private static final ObjectMapper objectMapper = new ObjectMapper()
-            .registerModule(new JavaTimeModule());
+            .registerModule(new JavaTimeModule())
+            .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     
     @JsonProperty("vectors")
     private Map<String, Integer> vectors;

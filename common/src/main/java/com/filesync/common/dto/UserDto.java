@@ -2,6 +2,7 @@ package com.filesync.common.dto;
 
 import java.time.LocalDateTime;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 import jakarta.validation.constraints.NotBlank;
@@ -9,6 +10,7 @@ import jakarta.validation.constraints.NotBlank;
 /**
  * Data Transfer Object for user authentication
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class UserDto {
     
     @JsonProperty("user_id")

@@ -1,10 +1,12 @@
 package com.filesync.common.dto;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 /**
  * Data Transfer Object for authentication requests and responses
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class AuthDto {
     
     @JsonProperty("username")
