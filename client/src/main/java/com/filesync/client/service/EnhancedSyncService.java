@@ -276,15 +276,16 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
             String currentStatus = databaseService.getSyncStatus(filePath);
             logger.info("Current database status before upload: {} for file: {}", currentStatus, filePath);
             
-            // Check if file was recently deleted to prevent race conditions
-            if (isRecentlyDeleted(filePath)) {
-                // Check if file actually exists now - if so, clear deletion and proceed
-                if (Files.exists(file)) {
-                    logger.info("File was previously deleted but now exists again: {}", filePath);
-                    databaseService.clearDeletionStatus(filePath);
-                } else {
-                    logger.info("Skipping upload of file marked as deleted: {}", filePath);
-                    return;
+            // CRITICAL FIX: Handle previously deleted files more gracefully
+            if ("DELETED".equals(currentStatus)) {
+                logger.info("File was previously deleted, clearing stale metadata: {}", filePath);
+                databaseService.clearStaleMetadata(filePath);
+                
+                // Add a small delay to ensure database changes are committed
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
                 }
             }
             
@@ -353,12 +354,20 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
             return;
         }
         
-        // Calculate version vector and checksum
-        VersionVector versionVector = databaseService.getFileVersionVector(relativePath);
-        if (versionVector == null) {
-            versionVector = new VersionVector();
+        // CRITICAL FIX: Don't create version vector before upload for new files
+        // This prevents conflicts when server creates the file
+        String existingStatus = databaseService.getSyncStatus(relativePath);
+        boolean isNewFile = existingStatus == null;
+        
+        VersionVector versionVector = null;
+        if (!isNewFile) {
+            // Only get/increment version vector for existing files
+            versionVector = databaseService.getFileVersionVector(relativePath);
+            if (versionVector == null) {
+                versionVector = new VersionVector();
+            }
+            versionVector.increment(clientId);
         }
-        versionVector.increment(clientId);
         
         byte[] fileData = Files.readAllBytes(file);
         String checksum = calculateChecksum(fileData);
@@ -370,15 +379,29 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         builder.addBinaryBody("file", file.toFile(), ContentType.APPLICATION_OCTET_STREAM, file.getFileName().toString());
         builder.addTextBody("path", relativePath, ContentType.TEXT_PLAIN);
         builder.addTextBody("checksum", checksum, ContentType.TEXT_PLAIN);
-        builder.addTextBody("versionVector", objectMapper.writeValueAsString(versionVector), ContentType.APPLICATION_JSON);
+        
+        // Only send version vector for existing files
+        if (versionVector != null) {
+            builder.addTextBody("versionVector", objectMapper.writeValueAsString(versionVector), ContentType.APPLICATION_JSON);
+        }
         builder.addTextBody("clientId", clientId, ContentType.TEXT_PLAIN);
         
         post.setEntity(builder.build());
         
         try (CloseableHttpResponse response = httpClient.execute(post)) {
             if (response.getCode() == 200) {
-                // Update local database
-                databaseService.updateFileMetadata(relativePath, checksum, Files.size(file), versionVector);
+                // Only update local metadata after successful upload
+                if (isNewFile) {
+                    // For new files, create initial version vector
+                    VersionVector newVersionVector = new VersionVector();
+                    newVersionVector.increment(clientId);
+                    databaseService.storeFileVersionVector(UUID.randomUUID().toString(), relativePath, 
+                        newVersionVector, LocalDateTime.now(), Files.size(file), checksum);
+                } else {
+                    // For existing files, update metadata
+                    databaseService.updateFileMetadata(relativePath, checksum, Files.size(file), versionVector);
+                }
+                
                 databaseService.markFileSynced(relativePath);
                 logger.info("File uploaded successfully: {}", relativePath);
             } else {
@@ -799,9 +822,15 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
             // Check if file is marked as deleted locally FIRST
             String syncStatus = databaseService.getSyncStatus(filePath);
             if ("DELETED".equals(syncStatus)) {
-                // File was deleted locally, don't sync
-                logger.debug("Skipping sync for file marked as deleted: {}", filePath);
-                return;
+                // Check if local file actually exists despite being marked deleted
+                if (Files.exists(localPath)) {
+                    logger.info("File marked as DELETED but exists locally, clearing stale metadata: {}", filePath);
+                    databaseService.clearStaleMetadata(filePath);
+                } else {
+                    // File was deleted locally, don't sync
+                    logger.debug("Skipping sync for file marked as deleted: {}", filePath);
+                    return;
+                }
             }
             
             // Get local version vector

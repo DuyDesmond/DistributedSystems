@@ -311,13 +311,15 @@ public class ChunkService {
         
         FileEntity fileEntity;
         if (existingFile.isPresent()) {
-            // Update existing file
+            // Update existing file - FIXED: Don't increment version vector for simple updates
+            // Let the SyncService handle version vector management during sync operations
             fileEntity = existingFile.get();
             fileEntity.setFileSize(fileSize);
             fileEntity.setChecksum(checksum);
             fileEntity.setModifiedAt(LocalDateTime.now());
-            fileEntity.getCurrentVersionVector().increment(user.getUserId());
             fileEntity.setStoragePath(storagePath);
+            // Clear any conflict status since we're successfully uploading
+            fileEntity.setConflictStatus(null);
         } else {
             // Create new file
             String fileName = Paths.get(session.getFilePath()).getFileName().toString();

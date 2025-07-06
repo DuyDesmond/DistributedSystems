@@ -102,7 +102,7 @@ public class DatabaseService {
     
     /**
      * Store or update file version vector
-     * FIXED: Preserve existing sync status when updating, only set PENDING for new records
+     * FIXED: Clear DELETED status when actively uploading a file
      */
     public void storeFileVersionVector(String fileId, String filePath, VersionVector versionVector, 
                                      LocalDateTime lastModified, Long fileSize, String checksum) {
@@ -110,11 +110,11 @@ public class DatabaseService {
         String currentStatus = getSyncStatus(filePath);
         String statusToSet = (currentStatus != null) ? currentStatus : "PENDING";
         
-        // Don't overwrite DELETED status with PENDING unless explicitly intended
+        // CRITICAL FIX: Clear DELETED status when storing new version vector
+        // This indicates the file is being actively uploaded/synced
         if ("DELETED".equals(currentStatus)) {
-            logger.warn("Attempting to store version vector for file marked as DELETED: {}", filePath);
-            logger.warn("This might indicate a race condition - keeping DELETED status");
-            statusToSet = "DELETED";
+            logger.info("Clearing DELETED status for file being uploaded: {}", filePath);
+            statusToSet = "PENDING";
         }
         
         String sql = """
@@ -482,6 +482,19 @@ public class DatabaseService {
         if ("DELETED".equals(currentStatus)) {
             updateSyncStatus(filePath, "PENDING");
             logger.debug("Cleared deletion status for: {}", filePath);
+        }
+    }
+    
+    /**
+     * Clear stale metadata for a file (used when re-uploading previously deleted files)
+     * FIXED: Instead of removing record completely, reset status to allow clean re-upload
+     */
+    public void clearStaleMetadata(String filePath) {
+        String currentStatus = getSyncStatus(filePath);
+        if ("DELETED".equals(currentStatus)) {
+            logger.info("Clearing DELETED status for previously deleted file being re-uploaded: {}", filePath);
+            // Reset to PENDING instead of removing record completely
+            updateSyncStatus(filePath, "PENDING");
         }
     }
     
