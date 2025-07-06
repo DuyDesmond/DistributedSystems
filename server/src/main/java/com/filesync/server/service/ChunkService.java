@@ -67,8 +67,25 @@ public class ChunkService {
     public ChunkUploadSessionEntity initiateChunkedUpload(String username, String fileId, 
                                                          String filePath, Integer totalChunks, 
                                                          Long totalFileSize) {
+        // Validate input parameters
+        if (username == null || username.trim().isEmpty()) {
+            throw new IllegalArgumentException("Username cannot be null or empty");
+        }
+        if (fileId == null || fileId.trim().isEmpty()) {
+            throw new IllegalArgumentException("FileId cannot be null or empty");
+        }
+        if (filePath == null || filePath.trim().isEmpty()) {
+            throw new IllegalArgumentException("FilePath cannot be null or empty");
+        }
+        if (totalChunks == null || totalChunks <= 0) {
+            throw new IllegalArgumentException("TotalChunks must be a positive integer");
+        }
+        if (totalFileSize == null || totalFileSize <= 0) {
+            throw new IllegalArgumentException("TotalFileSize must be a positive number");
+        }
+        
         UserEntity user = userRepository.findByUsername(username)
-            .orElseThrow(() -> new RuntimeException("User not found"));
+            .orElseThrow(() -> new RuntimeException("User not found: " + username));
         
         // Check for concurrent session limits
         long activeSessions = sessionRepository.countActiveSessionsByUser(user, LocalDateTime.now());

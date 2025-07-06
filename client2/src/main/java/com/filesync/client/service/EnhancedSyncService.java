@@ -46,6 +46,7 @@ import com.filesync.common.dto.FileChunkDto;
 import com.filesync.common.dto.FileDto;
 import com.filesync.common.dto.SyncEventDto;
 import com.filesync.common.model.VersionVector;
+import com.filesync.common.util.EnhancedChunkingUtil;
 
 import javafx.application.Platform;
 
@@ -327,14 +328,22 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         logger.info("Starting chunked upload for large file: {} ({} bytes)", relativePath, Files.size(file));
         
         String fileId = UUID.randomUUID().toString();
-        byte[] fileBytes = Files.readAllBytes(file);
+        long fileSize = Files.size(file);
         
-        // Create chunks
-        List<FileChunkDto> chunks = createChunks(fileBytes, fileId);
-        logger.info("Created {} chunks for file: {}", chunks.size(), relativePath);
+        // Use EnhancedChunkingUtil for optimal chunking
+        if (!EnhancedChunkingUtil.shouldChunkFile(fileSize)) {
+            logger.warn("File {} doesn't meet chunking threshold, using direct upload", relativePath);
+            uploadFileDirectly(file, relativePath);
+            return;
+        }
+        
+        // Create chunks using the enhanced utility
+        List<FileChunkDto> chunks = EnhancedChunkingUtil.chunkFile(file, fileId);
+        logger.info("Created {} chunks for file: {} (chunk size: ~{} bytes)", 
+            chunks.size(), relativePath, chunks.get(0).getChunkSize());
         
         // Initiate chunked upload session
-        String sessionId = initiateChunkedUploadSession(fileId, relativePath, chunks.size(), (long) fileBytes.length);
+        String sessionId = initiateChunkedUploadSession(fileId, relativePath, chunks.size(), fileSize);
         
         // Upload chunks sequentially
         for (FileChunkDto chunk : chunks) {
@@ -453,6 +462,9 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
      * Initiate chunked upload session on server
      */
     private String initiateChunkedUploadSession(String fileId, String filePath, int totalChunks, long totalFileSize) throws IOException {
+        logger.debug("Initiating chunked upload - fileId: {}, filePath: {}, totalChunks: {}, totalFileSize: {}", 
+            fileId, filePath, totalChunks, totalFileSize);
+            
         HttpPost post = new HttpPost(config.getServerUrl() + "/files/upload/initiate-chunked");
         post.setHeader("Authorization", "Bearer " + config.getToken());
         
@@ -465,16 +477,21 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         post.setEntity(builder.build());
         
         try (CloseableHttpResponse response = httpClient.execute(post)) {
+            String responseBody = EntityUtils.toString(response.getEntity());
+            
             if (response.getCode() == 200) {
-                String responseBody = EntityUtils.toString(response.getEntity());
                 ChunkUploadSessionDto session = objectMapper.readValue(responseBody, ChunkUploadSessionDto.class);
                 return session.getSessionId();
             } else {
-                String responseBody = EntityUtils.toString(response.getEntity());
-                throw new IOException("Failed to initiate chunked upload: " + responseBody);
+                logger.error("Server returned error {} for chunked upload initiation: {}", 
+                    response.getCode(), responseBody);
+                throw new IOException("Failed to initiate chunked upload (HTTP " + response.getCode() + "): " + responseBody);
             }
         } catch (ParseException e) {
             throw new IOException("Failed to parse response", e);
+        } catch (Exception e) {
+            logger.error("Unexpected error during chunked upload initiation", e);
+            throw new IOException("Failed to initiate chunked upload: " + e.getMessage(), e);
         }
     }
     
