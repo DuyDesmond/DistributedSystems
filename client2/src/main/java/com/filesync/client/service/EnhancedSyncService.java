@@ -404,6 +404,12 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
                 }
                 
                 databaseService.markFileSynced(relativePath);
+                
+                // CRITICAL FIX: Mark file as recently uploaded to prevent metadata conflicts
+                if (conflictManager != null) {
+                    conflictManager.markFileAsRecentlyUploaded(relativePath);
+                }
+                
                 logger.info("File uploaded successfully: {}", relativePath);
             } else {
                 String responseBody;
@@ -859,6 +865,36 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
                     queueFileSync(filePath, SyncOperation.UPLOAD);
                 } else if (localVector.isConcurrentWith(serverVector)) {
                     // Conflict - needs resolution
+                    // BUT first check if this file was recently resolved to prevent endless loops
+                    if (conflictManager != null && conflictManager.shouldSkipConflictCheck(filePath)) {
+                        logger.debug("Skipping conflict detection for {} - file recently resolved", filePath);
+                        return;
+                    }
+                    
+                    // Additional check: if checksums match, this might just be a metadata timing issue
+                    try {
+                        Path checkPath = Paths.get(config.getLocalSyncPath(), filePath);
+                        if (Files.exists(checkPath)) {
+                            byte[] localFileData = Files.readAllBytes(checkPath);
+                            String localChecksum = calculateChecksum(localFileData);
+                            
+                            if (localChecksum.equals(serverFile.getChecksum())) {
+                                logger.info("Checksums match despite version vector conflict - skipping conflict resolution for: {}", filePath);
+                                // Update local metadata to match server
+                                databaseService.updateFileMetadata(filePath, serverFile.getChecksum(), 
+                                    serverFile.getFileSize(), serverFile.getVersionVector());
+                                    
+                                // CRITICAL FIX: Mark as recently resolved to prevent immediate re-triggering
+                                if (conflictManager != null) {
+                                    conflictManager.markFileAsRecentlyResolved(filePath);
+                                }
+                                return;
+                            }
+                        }
+                    } catch (Exception e) {
+                        logger.debug("Error checking file content for conflict resolution: {}", filePath, e);
+                    }
+                    
                     queueFileSync(filePath, SyncOperation.CONFLICT_RESOLVE);
                 }
                 // If vectors are equal, files are in sync - no action needed
@@ -1533,6 +1569,9 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
             // Upload the resolved file
             uploadFile(localPath.toString());
             logger.info("Successfully uploaded resolved file: {}", filePath);
+            
+            // Note: ConflictManager should mark file as resolved BEFORE calling this method
+            // to prevent race conditions with file watching
             
         } catch (Exception e) {
             logger.error("Error uploading resolved file: {}", filePath, e);

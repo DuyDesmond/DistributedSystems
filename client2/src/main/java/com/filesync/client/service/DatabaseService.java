@@ -443,8 +443,28 @@ public class DatabaseService {
     
     /**
      * Update file metadata with version vector
+     * IMPROVED: Only update if there are actual changes to prevent unnecessary triggers
      */
     public void updateFileMetadata(String filePath, String checksum, long fileSize, VersionVector versionVector) {
+        // First check if the metadata actually changed
+        String currentChecksum = getCurrentChecksum(filePath);
+        VersionVector currentVector = getFileVersionVectorByPath(filePath);
+        
+        boolean needsUpdate = false;
+        if (!checksum.equals(currentChecksum)) {
+            logger.debug("Checksum changed for {}: {} -> {}", filePath, currentChecksum, checksum);
+            needsUpdate = true;
+        }
+        if (currentVector == null || !currentVector.equals(versionVector)) {
+            logger.debug("Version vector changed for {}", filePath);
+            needsUpdate = true;
+        }
+        
+        if (!needsUpdate) {
+            logger.debug("No metadata changes needed for: {}", filePath);
+            return;
+        }
+        
         String sql = """
             UPDATE file_version_vector 
             SET checksum = ?, file_size = ?, version_vector = ?, sync_status = 'SYNCED'
@@ -465,6 +485,28 @@ public class DatabaseService {
         } catch (SQLException e) {
             logger.error("Failed to update file metadata for: " + filePath, e);
         }
+    }
+    
+    /**
+     * Get current checksum for a file
+     */
+    private String getCurrentChecksum(String filePath) {
+        String sql = "SELECT checksum FROM file_version_vector WHERE file_path = ?";
+        
+        try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
+            pstmt.setString(1, filePath);
+            
+            try (ResultSet rs = pstmt.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getString("checksum");
+                }
+            }
+            
+        } catch (SQLException e) {
+            logger.error("Failed to get current checksum for: " + filePath, e);
+        }
+        
+        return "";
     }
     
     /**
