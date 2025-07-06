@@ -51,42 +51,11 @@ public class FileSyncClientApplication extends Application {
     }
     
     private void shutdown() {
-        System.out.println("Shutting down File Sync Client...");
-        
-        try {
-            // Stop file watching first
-            if (fileWatchService != null) {
-                fileWatchService.stop();
-            }
-            
-            // Shutdown sync service (this should handle WebSocket and chunk download service)
-            if (syncService != null) {
-                syncService.stop();
-            }
-            
-            // Close database connection
-            if (databaseService != null) {
-                databaseService.close();
-            }
-            
-            // Shutdown executor service
-            if (executorService != null) {
-                executorService.shutdown();
-                try {
-                    // Wait for executor to finish
-                    if (!executorService.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS)) {
-                        executorService.shutdownNow();
-                    }
-                } catch (InterruptedException e) {
-                    executorService.shutdownNow();
-                    Thread.currentThread().interrupt();
-                }
-            }
-            
-            System.out.println("File Sync Client shutdown complete");
-        } catch (Exception e) {
-            System.err.println("Error during shutdown: " + e.getMessage());
-            e.printStackTrace();
+        if (fileWatchService != null) {
+            fileWatchService.stop();
+        }
+        if (executorService != null) {
+            executorService.shutdown();
         }
     }
     

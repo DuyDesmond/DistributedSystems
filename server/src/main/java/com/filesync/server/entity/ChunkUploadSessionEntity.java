@@ -6,6 +6,8 @@ import java.util.Map;
 
 import org.hibernate.annotations.CreationTimestamp;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import jakarta.persistence.CollectionTable;
 import jakarta.persistence.Column;
 import jakarta.persistence.ElementCollection;
@@ -33,6 +35,7 @@ public class ChunkUploadSessionEntity {
     
     @Id
     @Column(name = "session_id")
+    @JsonProperty("session_id")
     private String sessionId;
     
     @ManyToOne(fetch = FetchType.LAZY)
@@ -40,25 +43,32 @@ public class ChunkUploadSessionEntity {
     private UserEntity user;
     
     @Column(name = "file_id", nullable = false)
+    @JsonProperty("file_id")
     private String fileId;
     
     @Column(name = "file_path", nullable = false)
+    @JsonProperty("file_path")
     private String filePath;
     
     @Column(name = "total_chunks", nullable = false)
+    @JsonProperty("total_chunks")
     private Integer totalChunks;
     
     @Column(name = "received_chunks", nullable = false)
+    @JsonProperty("received_chunks")
     private Integer receivedChunks = 0;
     
     @Column(name = "total_file_size")
+    @JsonProperty("total_file_size")
     private Long totalFileSize;
     
     @Column(name = "received_size")
+    @JsonProperty("received_size")
     private Long receivedSize = 0L;
     
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false)
+    @JsonProperty("status")
     private UploadStatus status = UploadStatus.IN_PROGRESS;
     
     @ElementCollection
@@ -69,22 +79,28 @@ public class ChunkUploadSessionEntity {
     private Map<Integer, String> receivedChunkChecksums = new HashMap<>();
     
     @Column(name = "storage_path")
+    @JsonProperty("storage_path")
     private String storagePath;
     
     @Column(name = "final_checksum")
+    @JsonProperty("final_checksum")
     private String finalChecksum;
     
     @CreationTimestamp
     @Column(name = "created_at", nullable = false)
+    @JsonProperty("created_at")
     private LocalDateTime createdAt;
     
     @Column(name = "completed_at")
+    @JsonProperty("completed_at")
     private LocalDateTime completedAt;
     
     @Column(name = "expires_at", nullable = false)
+    @JsonProperty("expires_at")
     private LocalDateTime expiresAt;
     
     @Column(name = "error_message")
+    @JsonProperty("error_message")
     private String errorMessage;
     
     // Constructors
@@ -118,6 +134,7 @@ public class ChunkUploadSessionEntity {
         return LocalDateTime.now().isAfter(expiresAt);
     }
     
+    @JsonProperty("progress")
     public double getProgress() {
         if (totalChunks == null || totalChunks == 0) return 0.0;
         return (double) receivedChunks / totalChunks * 100.0;

@@ -58,6 +58,7 @@ public class SyncService implements WebSocketSyncClient.SyncEventHandler {
         this.executorService = executorService;
         this.objectMapper = new ObjectMapper();
         this.objectMapper.registerModule(new JavaTimeModule());
+        this.objectMapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
         this.httpClient = HttpClients.createDefault();
         
         startSyncProcessor();

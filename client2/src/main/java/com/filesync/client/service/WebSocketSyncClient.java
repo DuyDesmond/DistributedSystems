@@ -48,6 +48,7 @@ public class WebSocketSyncClient extends WebSocketClient {
         this.executorService = executorService;
         this.objectMapper = new ObjectMapper();
         this.objectMapper.registerModule(new JavaTimeModule());
+        this.objectMapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
         
         // Add authorization header if token is available
         if (config.getToken() != null && !config.getToken().isEmpty()) {
@@ -141,10 +142,14 @@ public class WebSocketSyncClient extends WebSocketClient {
         logger.warn("WebSocket connection closed. Code: {}, Reason: {}, Remote: {}", code, reason, remote);
         
         // Notify handler about connection status
-        eventHandler.handleConnectionStatusChange(false);
+        try {
+            eventHandler.handleConnectionStatusChange(false);
+        } catch (Exception e) {
+            logger.error("Error notifying connection status change", e);
+        }
         
-        // Schedule reconnection if needed
-        if (shouldReconnect.get()) {
+        // Schedule reconnection if needed and the service is still operational
+        if (shouldReconnect.get() && !executorService.isShutdown()) {
             scheduleReconnection();
         }
     }
@@ -180,17 +185,19 @@ public class WebSocketSyncClient extends WebSocketClient {
      */
     private void sendStompConnect() {
         try {
-            String connectFrame = "CONNECT\n" +
-                                 "accept-version:1.0,1.1,1.2\n" +
-                                 "host:" + getURI().getHost() + "\n";
+            StringBuilder connectFrame = new StringBuilder();
+            connectFrame.append("CONNECT\n");
+            connectFrame.append("accept-version:1.0,1.1,1.2\n");
+            connectFrame.append("host:").append(getURI().getHost()).append("\n");
             
             if (config.getToken() != null && !config.getToken().isEmpty()) {
-                connectFrame += "Authorization:Bearer " + config.getToken() + "\n";
+                connectFrame.append("Authorization:Bearer ").append(config.getToken()).append("\n");
             }
             
-            connectFrame += "\n";
+            connectFrame.append("\n");  // Empty line separates headers from body
+            connectFrame.append('\0');  // Null terminator for STOMP protocol
             
-            send(connectFrame);
+            send(connectFrame.toString());
             logger.debug("Sent STOMP CONNECT frame");
         } catch (Exception e) {
             logger.error("Error sending STOMP CONNECT frame", e);
@@ -228,7 +235,8 @@ public class WebSocketSyncClient extends WebSocketClient {
      * Send heartbeat to keep connection alive
      */
     private void sendHeartbeat() {
-        if (connected.get()) {
+        // Check if connection is valid and executor is not shutdown
+        if (connected.get() && shouldReconnect.get() && !executorService.isShutdown()) {
             try {
                 SyncEventDto heartbeat = new SyncEventDto();
                 heartbeat.setEventType("HEARTBEAT");
@@ -244,6 +252,8 @@ public class WebSocketSyncClient extends WebSocketClient {
                 logger.debug("Sent heartbeat");
             } catch (Exception e) {
                 logger.error("Error sending heartbeat", e);
+                // If we can't send heartbeat, the connection might be broken
+                connected.set(false);
             }
         }
     }
@@ -252,26 +262,59 @@ public class WebSocketSyncClient extends WebSocketClient {
      * Schedule periodic heartbeat
      */
     private void scheduleHeartbeat() {
-        executorService.scheduleWithFixedDelay(this::sendHeartbeat, 
-            HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_INTERVAL_SECONDS, TimeUnit.SECONDS);
+        try {
+            // Check if executor service is shutdown before scheduling
+            if (executorService.isShutdown() || executorService.isTerminated()) {
+                logger.debug("Executor service is shutdown, skipping heartbeat scheduling");
+                return;
+            }
+            
+            executorService.scheduleWithFixedDelay(this::sendHeartbeat, 
+                HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_INTERVAL_SECONDS, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            logger.debug("Failed to schedule heartbeat - executor service is shutting down");
+        } catch (Exception e) {
+            logger.error("Unexpected error scheduling heartbeat", e);
+        }
     }
     
     /**
      * Schedule reconnection attempt
      */
     private void scheduleReconnection() {
-        executorService.schedule(() -> {
-            if (shouldReconnect.get() && !connected.get()) {
-                logger.info("Attempting to reconnect WebSocket...");
-                try {
-                    reconnect();
-                } catch (Exception e) {
-                    logger.error("Failed to reconnect WebSocket", e);
-                    // Schedule another reconnection attempt
-                    scheduleReconnection();
-                }
+        // First check if we should even attempt reconnection
+        if (!shouldReconnect.get()) {
+            logger.debug("Reconnection disabled, skipping reconnection attempt");
+            return;
+        }
+        
+        try {
+            // Check if executor service is shutdown before scheduling
+            if (executorService.isShutdown() || executorService.isTerminated()) {
+                logger.debug("Executor service is shutdown, skipping reconnection attempt");
+                return;
             }
-        }, RECONNECT_DELAY_SECONDS, TimeUnit.SECONDS);
+            
+            executorService.schedule(() -> {
+                // Double-check shouldReconnect inside the scheduled task
+                if (shouldReconnect.get() && !connected.get()) {
+                    logger.info("Attempting to reconnect WebSocket...");
+                    try {
+                        reconnect();
+                    } catch (Exception e) {
+                        logger.error("Failed to reconnect WebSocket", e);
+                        // Schedule another reconnection attempt with additional safety check
+                        if (shouldReconnect.get() && !executorService.isShutdown()) {
+                            scheduleReconnection();
+                        }
+                    }
+                }
+            }, RECONNECT_DELAY_SECONDS, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            logger.debug("Failed to schedule reconnection - executor service is shutting down");
+        } catch (Exception e) {
+            logger.error("Unexpected error scheduling reconnection", e);
+        }
     }
     
     /**
@@ -328,10 +371,23 @@ public class WebSocketSyncClient extends WebSocketClient {
      * Gracefully shutdown the WebSocket client
      */
     public void shutdown() {
+        logger.info("Shutting down WebSocket client...");
+        
+        // Stop reconnection attempts first
         shouldReconnect.set(false);
-        if (connected.get()) {
-            close();
+        
+        // Set connection status to false
+        connected.set(false);
+        
+        // Close the WebSocket connection
+        if (getConnection() != null && !getConnection().isClosed()) {
+            try {
+                close();
+            } catch (Exception e) {
+                logger.warn("Error closing WebSocket connection", e);
+            }
         }
-        logger.info("WebSocket client shutdown");
+        
+        logger.info("WebSocket client shutdown complete");
     }
 }

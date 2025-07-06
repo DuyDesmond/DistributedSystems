@@ -13,8 +13,7 @@ A distributed file synchronization system similar to Dropbox, built with Java, S
 ### Core Synchronization
 - **Version Vector Conflict Detection**: Advanced conflict resolution using vector clocks
 - **Real-time Updates**: WebSocket-based instant file change notifications
-- **File Versioning**: Complete version history with rollback capabilities
-- **Offline Support**: Local sync queue for offline changes
+- **File Versioning**: Complete version history
 
 ### Security & Authentication
 - **JWT Authentication**: Secure token-based authentication with refresh tokens

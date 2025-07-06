@@ -80,12 +80,14 @@ public class FileService {
         
         FileEntity fileEntity;
         if (existingFile != null) {
-            // Update existing file
+            // Update existing file - FIXED: Don't increment version vector for simple updates
+            // Let the SyncService handle version vector management during sync operations
             existingFile.setFileSize(file.getSize());
             existingFile.setChecksum(checksum);
             existingFile.setModifiedAt(LocalDateTime.now());
-            existingFile.getCurrentVersionVector().increment(user.getUserId());
             existingFile.setStoragePath(storagePath);
+            // Clear any conflict status since we're successfully uploading
+            existingFile.setConflictStatus(null);
             fileEntity = fileRepository.save(existingFile);
         } else {
             // Create new file

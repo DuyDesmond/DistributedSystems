@@ -259,12 +259,38 @@ public class ChunkDownloadService {
      * Shutdown the download service
      */
     public void shutdown() {
+        logger.info("Shutting down ChunkDownloadService...");
+        
+        // Shutdown executor service gracefully
         downloadExecutor.shutdown();
+        try {
+            // Wait for existing tasks to complete
+            if (!downloadExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
+                logger.warn("Download executor did not terminate gracefully, forcing shutdown");
+                downloadExecutor.shutdownNow();
+                
+                // Wait a bit more for force-shutdown to complete
+                if (!downloadExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                    logger.error("Download executor did not terminate after force shutdown");
+                }
+            }
+        } catch (InterruptedException e) {
+            logger.warn("Interrupted while waiting for executor shutdown");
+            downloadExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+        
+        // Close HTTP client
         try {
             httpClient.close();
         } catch (IOException e) {
             logger.error("Error closing HTTP client", e);
         }
+        
+        // Clear progress tracking
+        downloadProgressMap.clear();
+        
+        logger.info("ChunkDownloadService shutdown complete");
     }
     
     /**

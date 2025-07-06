@@ -102,13 +102,25 @@ public class DatabaseService {
     
     /**
      * Store or update file version vector
+     * FIXED: Clear DELETED status when actively uploading a file
      */
     public void storeFileVersionVector(String fileId, String filePath, VersionVector versionVector, 
                                      LocalDateTime lastModified, Long fileSize, String checksum) {
+        // First check if record exists and get current status
+        String currentStatus = getSyncStatus(filePath);
+        String statusToSet = (currentStatus != null) ? currentStatus : "PENDING";
+        
+        // CRITICAL FIX: Clear DELETED status when storing new version vector
+        // This indicates the file is being actively uploaded/synced
+        if ("DELETED".equals(currentStatus)) {
+            logger.info("Clearing DELETED status for file being uploaded: {}", filePath);
+            statusToSet = "PENDING";
+        }
+        
         String sql = """
             INSERT OR REPLACE INTO file_version_vector 
             (file_id, file_path, version_vector, last_modified, file_size, checksum, sync_status)
-            VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """;
         
         try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
@@ -118,9 +130,10 @@ public class DatabaseService {
             pstmt.setTimestamp(4, Timestamp.valueOf(lastModified));
             pstmt.setObject(5, fileSize);
             pstmt.setString(6, checksum);
+            pstmt.setString(7, statusToSet);
             
             pstmt.executeUpdate();
-            logger.debug("Stored version vector for file: {}", filePath);
+            logger.debug("Stored version vector for file: {} (status: {})", filePath, statusToSet);
             
         } catch (SQLException e) {
             logger.error("Failed to store file version vector for: " + filePath, e);
@@ -196,9 +209,25 @@ public class DatabaseService {
     }
     
     /**
-     * Update sync status for a file
+     * Update sync status for a file with detailed logging
      */
     public void updateSyncStatus(String filePath, String status) {
+        String previousStatus = getSyncStatus(filePath);
+        
+        // DEBUGGING: Log all status transitions with stack trace
+        if (!status.equals(previousStatus)) {
+            logger.warn("=== SYNC STATUS CHANGE ===");
+            logger.warn("File: {}", filePath);
+            logger.warn("Previous Status: {}", previousStatus);
+            logger.warn("New Status: {}", status);
+            logger.warn("Stack trace:");
+            StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+            for (int i = 2; i < Math.min(10, stack.length); i++) {
+                logger.warn("  at {}", stack[i]);
+            }
+            logger.warn("=== END STATUS CHANGE ===");
+        }
+        
         String sql = "UPDATE file_version_vector SET sync_status = ? WHERE file_path = ?";
         
         try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
@@ -207,7 +236,9 @@ public class DatabaseService {
             
             int updated = pstmt.executeUpdate();
             if (updated > 0) {
-                logger.debug("Updated sync status for {}: {}", filePath, status);
+                logger.debug("Updated sync status for {}: {} (was: {})", filePath, status, previousStatus);
+            } else {
+                logger.warn("No records updated when setting sync status for {}: {}", filePath, status);
             }
             
         } catch (SQLException e) {
@@ -412,8 +443,28 @@ public class DatabaseService {
     
     /**
      * Update file metadata with version vector
+     * IMPROVED: Only update if there are actual changes to prevent unnecessary triggers
      */
     public void updateFileMetadata(String filePath, String checksum, long fileSize, VersionVector versionVector) {
+        // First check if the metadata actually changed
+        String currentChecksum = getCurrentChecksum(filePath);
+        VersionVector currentVector = getFileVersionVectorByPath(filePath);
+        
+        boolean needsUpdate = false;
+        if (!checksum.equals(currentChecksum)) {
+            logger.debug("Checksum changed for {}: {} -> {}", filePath, currentChecksum, checksum);
+            needsUpdate = true;
+        }
+        if (currentVector == null || !currentVector.equals(versionVector)) {
+            logger.debug("Version vector changed for {}", filePath);
+            needsUpdate = true;
+        }
+        
+        if (!needsUpdate) {
+            logger.debug("No metadata changes needed for: {}", filePath);
+            return;
+        }
+        
         String sql = """
             UPDATE file_version_vector 
             SET checksum = ?, file_size = ?, version_vector = ?, sync_status = 'SYNCED'
@@ -437,6 +488,28 @@ public class DatabaseService {
     }
     
     /**
+     * Get current checksum for a file
+     */
+    private String getCurrentChecksum(String filePath) {
+        String sql = "SELECT checksum FROM file_version_vector WHERE file_path = ?";
+        
+        try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
+            pstmt.setString(1, filePath);
+            
+            try (ResultSet rs = pstmt.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getString("checksum");
+                }
+            }
+            
+        } catch (SQLException e) {
+            logger.error("Failed to get current checksum for: " + filePath, e);
+        }
+        
+        return "";
+    }
+    
+    /**
      * Mark file as synced
      */
     public void markFileSynced(String filePath) {
@@ -451,6 +524,19 @@ public class DatabaseService {
         if ("DELETED".equals(currentStatus)) {
             updateSyncStatus(filePath, "PENDING");
             logger.debug("Cleared deletion status for: {}", filePath);
+        }
+    }
+    
+    /**
+     * Clear stale metadata for a file (used when re-uploading previously deleted files)
+     * FIXED: Instead of removing record completely, reset status to allow clean re-upload
+     */
+    public void clearStaleMetadata(String filePath) {
+        String currentStatus = getSyncStatus(filePath);
+        if ("DELETED".equals(currentStatus)) {
+            logger.info("Clearing DELETED status for previously deleted file being re-uploaded: {}", filePath);
+            // Reset to PENDING instead of removing record completely
+            updateSyncStatus(filePath, "PENDING");
         }
     }
     

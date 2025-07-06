@@ -41,10 +41,12 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.filesync.client.config.ClientConfig;
 import com.filesync.client.ui.ConflictResolutionController;
 import com.filesync.common.dto.AuthDto;
+import com.filesync.common.dto.ChunkUploadSessionDto;
 import com.filesync.common.dto.FileChunkDto;
 import com.filesync.common.dto.FileDto;
 import com.filesync.common.dto.SyncEventDto;
 import com.filesync.common.model.VersionVector;
+import com.filesync.common.util.EnhancedChunkingUtil;
 
 import javafx.application.Platform;
 
@@ -56,7 +58,7 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
     private static final Logger logger = LoggerFactory.getLogger(EnhancedSyncService.class);
     
     // Chunking configuration
-    private static final long CHUNK_SIZE_THRESHOLD = 5 * 1024 * 1024; // 50MB - files larger than this will be chunked
+    private static final long CHUNK_SIZE_THRESHOLD = 5 * 1024 * 1024; // 5MB - files larger than this will be chunked
     private static final long CHUNK_SIZE =  1024 * 1024; // 1MB per chunk
     private static final long MIN_CHUNK_SIZE = 1 * 1024 * 1024; // 1MB minimum
     private static final int MAX_CONCURRENT_CHUNKS = 3; // Maximum parallel chunk uploads
@@ -87,17 +89,7 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
     // Conflict management
     private ConflictManager conflictManager;
     
-    /**
-     * Simple DTO for chunk upload session response
-     */
-    public static class ChunkUploadSession {
-        private String sessionId;
-        
-        public ChunkUploadSession() {}
-        
-        public String getSessionId() { return sessionId; }
-        public void setSessionId(String sessionId) { this.sessionId = sessionId; }
-    }
+
     
     /**
      * Calculate SHA-256 checksum of file data
@@ -138,6 +130,7 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         this.executorService = executorService;
         this.objectMapper = new ObjectMapper();
         this.objectMapper.registerModule(new JavaTimeModule());
+        this.objectMapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
         this.httpClient = HttpClients.createDefault();
         this.clientId = config.getClientId(); // Use deterministic client ID from config
         
@@ -271,7 +264,8 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
      * Upload file implementation with chunking support
      */
     private void uploadFile(String filePath) {
-        logger.info("Starting upload for file: {}", filePath);
+        logger.info("=== STARTING UPLOAD ===");
+        logger.info("Upload requested for file: {}", filePath);
         
         try {
             Path file = Paths.get(config.getLocalSyncPath(), filePath);
@@ -280,19 +274,28 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
                 return;
             }
             
-            // Check if file was recently deleted to prevent race conditions
-            if (isRecentlyDeleted(filePath)) {
-                // Check if file actually exists now - if so, clear deletion and proceed
-                if (Files.exists(file)) {
-                    logger.info("File was previously deleted but now exists again: {}", filePath);
-                    databaseService.clearDeletionStatus(filePath);
-                } else {
-                    logger.info("Skipping upload of file marked as deleted: {}", filePath);
-                    return;
+            // DEBUGGING: Check current database status before upload
+            String currentStatus = databaseService.getSyncStatus(filePath);
+            logger.info("Current database status before upload: {} for file: {}", currentStatus, filePath);
+            
+            // CRITICAL FIX: Handle previously deleted files more gracefully
+            if ("DELETED".equals(currentStatus)) {
+                logger.info("File was previously deleted, clearing stale metadata: {}", filePath);
+                databaseService.clearStaleMetadata(filePath);
+                
+                // Add a small delay to ensure database changes are committed
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
                 }
             }
             
             long fileSize = Files.size(file);
+            
+            // DEBUGGING: Log file details
+            logger.info("File details - Size: {}, Exists: {}, Readable: {}", 
+                       fileSize, Files.exists(file), Files.isReadable(file));
             
             // Use chunked upload for large files
             if (shouldChunkFile(fileSize)) {
@@ -300,6 +303,11 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
             } else {
                 uploadFileDirectly(file, filePath);
             }
+            
+            // DEBUGGING: Check database status after upload
+            String afterStatus = databaseService.getSyncStatus(filePath);
+            logger.info("Database status after upload: {} for file: {}", afterStatus, filePath);
+            logger.info("=== UPLOAD COMPLETED ===");
             
         } catch (IOException e) {
             logger.error("Error uploading file: " + filePath, e);
@@ -320,14 +328,22 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         logger.info("Starting chunked upload for large file: {} ({} bytes)", relativePath, Files.size(file));
         
         String fileId = UUID.randomUUID().toString();
-        byte[] fileBytes = Files.readAllBytes(file);
+        long fileSize = Files.size(file);
         
-        // Create chunks
-        List<FileChunkDto> chunks = createChunks(fileBytes, fileId);
-        logger.info("Created {} chunks for file: {}", chunks.size(), relativePath);
+        // Use EnhancedChunkingUtil for optimal chunking
+        if (!EnhancedChunkingUtil.shouldChunkFile(fileSize)) {
+            logger.warn("File {} doesn't meet chunking threshold, using direct upload", relativePath);
+            uploadFileDirectly(file, relativePath);
+            return;
+        }
+        
+        // Create chunks using the enhanced utility
+        List<FileChunkDto> chunks = EnhancedChunkingUtil.chunkFile(file, fileId);
+        logger.info("Created {} chunks for file: {} (chunk size: ~{} bytes)", 
+            chunks.size(), relativePath, chunks.get(0).getChunkSize());
         
         // Initiate chunked upload session
-        String sessionId = initiateChunkedUploadSession(fileId, relativePath, chunks.size(), (long) fileBytes.length);
+        String sessionId = initiateChunkedUploadSession(fileId, relativePath, chunks.size(), fileSize);
         
         // Upload chunks sequentially
         for (FileChunkDto chunk : chunks) {
@@ -348,12 +364,20 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
             return;
         }
         
-        // Calculate version vector and checksum
-        VersionVector versionVector = databaseService.getFileVersionVector(relativePath);
-        if (versionVector == null) {
-            versionVector = new VersionVector();
+        // CRITICAL FIX: Don't create version vector before upload for new files
+        // This prevents conflicts when server creates the file
+        String existingStatus = databaseService.getSyncStatus(relativePath);
+        boolean isNewFile = existingStatus == null;
+        
+        VersionVector versionVector = null;
+        if (!isNewFile) {
+            // Only get/increment version vector for existing files
+            versionVector = databaseService.getFileVersionVector(relativePath);
+            if (versionVector == null) {
+                versionVector = new VersionVector();
+            }
+            versionVector.increment(clientId);
         }
-        versionVector.increment(clientId);
         
         byte[] fileData = Files.readAllBytes(file);
         String checksum = calculateChecksum(fileData);
@@ -365,16 +389,36 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         builder.addBinaryBody("file", file.toFile(), ContentType.APPLICATION_OCTET_STREAM, file.getFileName().toString());
         builder.addTextBody("path", relativePath, ContentType.TEXT_PLAIN);
         builder.addTextBody("checksum", checksum, ContentType.TEXT_PLAIN);
-        builder.addTextBody("versionVector", objectMapper.writeValueAsString(versionVector), ContentType.APPLICATION_JSON);
+        
+        // Only send version vector for existing files
+        if (versionVector != null) {
+            builder.addTextBody("versionVector", objectMapper.writeValueAsString(versionVector), ContentType.APPLICATION_JSON);
+        }
         builder.addTextBody("clientId", clientId, ContentType.TEXT_PLAIN);
         
         post.setEntity(builder.build());
         
         try (CloseableHttpResponse response = httpClient.execute(post)) {
             if (response.getCode() == 200) {
-                // Update local database
-                databaseService.updateFileMetadata(relativePath, checksum, Files.size(file), versionVector);
+                // Only update local metadata after successful upload
+                if (isNewFile) {
+                    // For new files, create initial version vector
+                    VersionVector newVersionVector = new VersionVector();
+                    newVersionVector.increment(clientId);
+                    databaseService.storeFileVersionVector(UUID.randomUUID().toString(), relativePath, 
+                        newVersionVector, LocalDateTime.now(), Files.size(file), checksum);
+                } else {
+                    // For existing files, update metadata
+                    databaseService.updateFileMetadata(relativePath, checksum, Files.size(file), versionVector);
+                }
+                
                 databaseService.markFileSynced(relativePath);
+                
+                // CRITICAL FIX: Mark file as recently uploaded to prevent metadata conflicts
+                if (conflictManager != null) {
+                    conflictManager.markFileAsRecentlyUploaded(relativePath);
+                }
+                
                 logger.info("File uploaded successfully: {}", relativePath);
             } else {
                 String responseBody;
@@ -418,6 +462,9 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
      * Initiate chunked upload session on server
      */
     private String initiateChunkedUploadSession(String fileId, String filePath, int totalChunks, long totalFileSize) throws IOException {
+        logger.debug("Initiating chunked upload - fileId: {}, filePath: {}, totalChunks: {}, totalFileSize: {}", 
+            fileId, filePath, totalChunks, totalFileSize);
+            
         HttpPost post = new HttpPost(config.getServerUrl() + "/files/upload/initiate-chunked");
         post.setHeader("Authorization", "Bearer " + config.getToken());
         
@@ -430,16 +477,21 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         post.setEntity(builder.build());
         
         try (CloseableHttpResponse response = httpClient.execute(post)) {
+            String responseBody = EntityUtils.toString(response.getEntity());
+            
             if (response.getCode() == 200) {
-                String responseBody = EntityUtils.toString(response.getEntity());
-                ChunkUploadSession session = objectMapper.readValue(responseBody, ChunkUploadSession.class);
+                ChunkUploadSessionDto session = objectMapper.readValue(responseBody, ChunkUploadSessionDto.class);
                 return session.getSessionId();
             } else {
-                String responseBody = EntityUtils.toString(response.getEntity());
-                throw new IOException("Failed to initiate chunked upload: " + responseBody);
+                logger.error("Server returned error {} for chunked upload initiation: {}", 
+                    response.getCode(), responseBody);
+                throw new IOException("Failed to initiate chunked upload (HTTP " + response.getCode() + "): " + responseBody);
             }
         } catch (ParseException e) {
             throw new IOException("Failed to parse response", e);
+        } catch (Exception e) {
+            logger.error("Unexpected error during chunked upload initiation", e);
+            throw new IOException("Failed to initiate chunked upload: " + e.getMessage(), e);
         }
     }
     
@@ -672,7 +724,7 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
     }
 
     /**
-     * Get server updates implementation
+     * Get server updates implementation with improved error handling
      */
     private void getServerUpdates() {
         logger.debug("Getting server updates");
@@ -686,6 +738,8 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
                     String responseBody = EntityUtils.toString(response.getEntity());
                     FileDto[] serverFiles = objectMapper.readValue(responseBody, FileDto[].class);
                     
+                    logger.debug("Received {} files from server", serverFiles.length);
+                    
                     // Create set of server file paths for quick lookup
                     Set<String> serverFilePaths = new HashSet<>();
                     for (FileDto serverFile : serverFiles) {
@@ -693,12 +747,18 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
                         processServerFile(serverFile);
                     }
                     
-                    // Clean up files that no longer exist on server
-                    cleanupDeletedFiles(serverFilePaths);
+                    // IMPROVED: Only clean up files after a longer delay to prevent race conditions
+                    // This gives more time for recently uploaded files to appear in server response
+                    executorService.schedule(() -> {
+                        logger.debug("Running delayed cleanup of deleted files");
+                        cleanupDeletedFiles(serverFilePaths);
+                    }, 30, TimeUnit.SECONDS); // Increased from 5 to 30 seconds
                     
                 } else if (response.getCode() == 401) {
                     // Token expired, needs re-authentication
                     logger.warn("Authentication token expired");
+                } else {
+                    logger.warn("Server returned status {} when getting file list", response.getCode());
                 }
             }
             
@@ -709,6 +769,7 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
 
     /**
      * Clean up files that no longer exist on server or are marked as deleted
+     * FIXED: Only delete files explicitly marked as DELETED, not missing files
      */
     private void cleanupDeletedFiles(Set<String> serverFilePaths) {
         try {
@@ -719,28 +780,52 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
                 String filePath = entry.getKey();
                 String syncStatus = entry.getValue();
                 
-                // If file is marked as DELETED or no longer exists on server, clean it up
-                if ("DELETED".equals(syncStatus) || !serverFilePaths.contains(filePath)) {
+                // CRITICAL FIX: Only clean up files that are explicitly marked as DELETED
+                // Do NOT delete files just because they're missing from server response
+                if ("DELETED".equals(syncStatus)) {
                     Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
                     
                     // Delete local file if it still exists
                     if (Files.exists(localPath)) {
                         try {
                             Files.delete(localPath);
-                            logger.info("Cleaned up local file that was deleted on server: {}", filePath);
+                            logger.info("Cleaned up local file marked as DELETED: {}", filePath);
                         } catch (IOException e) {
                             logger.warn("Failed to delete local file: {}", filePath, e);
                         }
                     }
                     
-                    // Remove from local database only if file doesn't exist on server
-                    // Keep DELETED status if file was marked as deleted locally
-                    if (!serverFilePaths.contains(filePath) && !"DELETED".equals(syncStatus)) {
-                        databaseService.removeFileRecord(filePath);
-                        logger.info("Removed database record for file deleted on server: {}", filePath);
-                    } else if ("DELETED".equals(syncStatus)) {
-                        // File was deleted locally, keep the DELETED marker for a while
-                        logger.debug("Keeping DELETED marker for locally deleted file: {}", filePath);
+                    // Keep DELETED status for coordination between clients
+                    logger.debug("Keeping DELETED marker for locally deleted file: {}", filePath);
+                }
+                // SEPARATE CLEANUP: Only remove database records for files confirmed as deleted on server
+                // AND not marked as locally deleted (to prevent re-download)
+                // CRITICAL FIX: Be much more conservative about removing records
+                else if (!serverFilePaths.contains(filePath) && !"DELETED".equals(syncStatus)) {
+                    Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
+                    
+                    // CONSERVATIVE APPROACH: Only remove records if:
+                    // 1. File doesn't exist locally AND
+                    // 2. Sync status is not PENDING (indicating recent upload) AND  
+                    // 3. File has been in a stable state for a while
+                    if (!Files.exists(localPath) && 
+                        !"PENDING".equals(syncStatus) && 
+                        !"UPLOADING".equals(syncStatus)) {
+                        
+                        // Additional safety check: verify file really doesn't exist on server
+                        String fileId = findFileIdByPath(filePath);
+                        if (fileId == null) {
+                            // Confirmed file doesn't exist on server, safe to remove record
+                            databaseService.removeFileRecord(filePath);
+                            logger.info("Removed database record for file confirmed not to exist on server: {}", filePath);
+                        } else {
+                            // File actually exists on server but wasn't in the list - update status
+                            logger.warn("File exists on server but wasn't in file list, updating status: {}", filePath);
+                            databaseService.updateSyncStatus(filePath, "PENDING");
+                        }
+                    } else {
+                        // File exists locally or has pending status - don't remove, might be newly uploaded
+                        logger.debug("Keeping database record for local or pending file: {} (status: {})", filePath, syncStatus);
                     }
                 }
             }
@@ -761,9 +846,15 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
             // Check if file is marked as deleted locally FIRST
             String syncStatus = databaseService.getSyncStatus(filePath);
             if ("DELETED".equals(syncStatus)) {
-                // File was deleted locally, don't sync
-                logger.debug("Skipping sync for file marked as deleted: {}", filePath);
-                return;
+                // Check if local file actually exists despite being marked deleted
+                if (Files.exists(localPath)) {
+                    logger.info("File marked as DELETED but exists locally, clearing stale metadata: {}", filePath);
+                    databaseService.clearStaleMetadata(filePath);
+                } else {
+                    // File was deleted locally, don't sync
+                    logger.debug("Skipping sync for file marked as deleted: {}", filePath);
+                    return;
+                }
             }
             
             // Get local version vector
@@ -791,6 +882,36 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
                     queueFileSync(filePath, SyncOperation.UPLOAD);
                 } else if (localVector.isConcurrentWith(serverVector)) {
                     // Conflict - needs resolution
+                    // BUT first check if this file was recently resolved to prevent endless loops
+                    if (conflictManager != null && conflictManager.shouldSkipConflictCheck(filePath)) {
+                        logger.debug("Skipping conflict detection for {} - file recently resolved", filePath);
+                        return;
+                    }
+                    
+                    // Additional check: if checksums match, this might just be a metadata timing issue
+                    try {
+                        Path checkPath = Paths.get(config.getLocalSyncPath(), filePath);
+                        if (Files.exists(checkPath)) {
+                            byte[] localFileData = Files.readAllBytes(checkPath);
+                            String localChecksum = calculateChecksum(localFileData);
+                            
+                            if (localChecksum.equals(serverFile.getChecksum())) {
+                                logger.info("Checksums match despite version vector conflict - skipping conflict resolution for: {}", filePath);
+                                // Update local metadata to match server
+                                databaseService.updateFileMetadata(filePath, serverFile.getChecksum(), 
+                                    serverFile.getFileSize(), serverFile.getVersionVector());
+                                    
+                                // CRITICAL FIX: Mark as recently resolved to prevent immediate re-triggering
+                                if (conflictManager != null) {
+                                    conflictManager.markFileAsRecentlyResolved(filePath);
+                                }
+                                return;
+                            }
+                        }
+                    } catch (Exception e) {
+                        logger.debug("Error checking file content for conflict resolution: {}", filePath, e);
+                    }
+                    
                     queueFileSync(filePath, SyncOperation.CONFLICT_RESOLVE);
                 }
                 // If vectors are equal, files are in sync - no action needed
@@ -878,7 +999,7 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
     
     /**
      * Queue file for deletion (compatibility method for FileWatchService)
-     * Process immediately to prevent race conditions with other clients
+     * FIXED: Added delay and verification to handle spurious file system events
      */
     public void queueFileForDeletion(Path filePath) {
         if (!isAuthenticated()) {
@@ -887,25 +1008,49 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
         }
         
         String filePathStr = getRelativePath(filePath);
-        logger.info("Processing immediate deletion for file: {}", filePathStr);
+        logger.info("File deletion event detected for: {}", filePathStr);
         
-        // CRITICAL: Mark as deleted IMMEDIATELY to prevent re-download during race conditions
-        markFileAsDeleted(filePathStr);
-        
-        // Queue for background processing 
-        queueFileSync(filePathStr, SyncOperation.DELETE);
-        
-        // Also process immediately in a separate thread to notify server
-        executorService.submit(() -> {
+        // CRITICAL FIX: Don't immediately mark as deleted
+        // Instead, schedule a delayed verification to handle spurious file system events
+        executorService.schedule(() -> {
             try {
-                deleteFileOnServer(filePathStr);
-                logger.info("Immediate deletion completed for: {}", filePathStr);
+                // Verify the file is actually gone after a delay
+                Path fullPath = Paths.get(config.getLocalSyncPath(), filePathStr);
+                if (!Files.exists(fullPath)) {
+                    // File confirmed deleted after delay, proceed with deletion
+                    logger.info("Confirmed file deletion after verification delay: {}", filePathStr);
+                    
+                    // Now mark as deleted and process
+                    markFileAsDeleted(filePathStr);
+                    queueFileSync(filePathStr, SyncOperation.DELETE);
+                    
+                    // Notify server
+                    executorService.submit(() -> {
+                        try {
+                            deleteFileOnServer(filePathStr);
+                            logger.info("Server deletion completed for: {}", filePathStr);
+                        } catch (Exception e) {
+                            logger.error("Failed to process server deletion for: " + filePathStr, e);
+                        }
+                    });
+                } else {
+                    // File exists again - was likely a spurious event (save, temp file, etc.)
+                    logger.info("File deletion event was spurious - file still exists: {}", filePathStr);
+                    
+                    // Clear any deletion status that might have been set
+                    String currentStatus = databaseService.getSyncStatus(filePathStr);
+                    if ("DELETED".equals(currentStatus)) {
+                        logger.info("Clearing spurious deletion status for: {}", filePathStr);
+                        databaseService.updateSyncStatus(filePathStr, "PENDING");
+                    }
+                    
+                    // Queue for upload to ensure it's properly synced
+                    queueFileSync(filePathStr, SyncOperation.UPLOAD);
+                }
             } catch (Exception e) {
-                logger.error("Failed to process immediate deletion for: " + filePathStr, e);
-                // If server deletion fails, we keep the local DELETED marker
-                // This prevents the file from being re-downloaded
+                logger.error("Error processing delayed file deletion verification for: " + filePathStr, e);
             }
-        });
+        }, 2, TimeUnit.SECONDS); // 2 second delay to handle spurious events
     }
     
     /**
@@ -1119,12 +1264,13 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
     /**
      * Clean up old DELETED markers periodically
      * This prevents the database from growing indefinitely with old deletion markers
+     * FIXED: Only remove DELETED markers after confirming with server
      */
     private void cleanupOldDeletedMarkers() {
         try {
-            // Remove DELETED markers older than 1 hour
+            // Remove DELETED markers older than 24 hours (increased from 1 hour for safety)
             // This gives enough time for all clients to sync the deletion
-            LocalDateTime cutoff = LocalDateTime.now().minusHours(1);
+            LocalDateTime cutoff = LocalDateTime.now().minusHours(24);
             logger.debug("Cleaning up deleted markers older than: {}", cutoff);
             
             Map<String, String> trackedFiles = databaseService.getAllTrackedFiles();
@@ -1133,17 +1279,24 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
                 String syncStatus = entry.getValue();
                 
                 if ("DELETED".equals(syncStatus)) {
-                    // Check if the file still doesn't exist on server
-                    // and if enough time has passed, remove the marker
-                    // For now, we'll implement a simple time-based cleanup
-                    // In a more sophisticated version, you could store timestamps
-                    
-                    // Remove the DELETED marker after some time to prevent database bloat
-                    // Only if file doesn't exist locally and isn't on server
                     Path localPath = Paths.get(config.getLocalSyncPath(), filePath);
+                    
+                    // CRITICAL FIX: Only remove DELETED markers if:
+                    // 1. File doesn't exist locally AND
+                    // 2. File is confirmed to not exist on server AND
+                    // 3. Enough time has passed (24 hours)
                     if (!Files.exists(localPath)) {
-                        databaseService.removeFileRecord(filePath);
-                        logger.debug("Cleaned up old DELETED marker for: {}", filePath);
+                        // First verify the file is actually deleted on server
+                        String fileId = findFileIdByPath(filePath);
+                        if (fileId == null) {
+                            // File confirmed not on server, safe to clean up
+                            databaseService.removeFileRecord(filePath);
+                            logger.debug("Cleaned up old DELETED marker for confirmed deleted file: {}", filePath);
+                        } else {
+                            // File still exists on server, clear DELETED status and re-sync
+                            logger.warn("File marked as DELETED but still exists on server, clearing deletion status: {}", filePath);
+                            databaseService.updateSyncStatus(filePath, "PENDING");
+                        }
                     }
                 }
             }
@@ -1433,6 +1586,9 @@ public class EnhancedSyncService implements WebSocketSyncClient.SyncEventHandler
             // Upload the resolved file
             uploadFile(localPath.toString());
             logger.info("Successfully uploaded resolved file: {}", filePath);
+            
+            // Note: ConflictManager should mark file as resolved BEFORE calling this method
+            // to prevent race conditions with file watching
             
         } catch (Exception e) {
             logger.error("Error uploading resolved file: {}", filePath, e);

@@ -2,6 +2,7 @@ package com.filesync.common.dto;
 
 import java.time.LocalDateTime;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.filesync.common.model.VersionVector;
 
@@ -10,6 +11,7 @@ import jakarta.validation.constraints.NotBlank;
 /**
  * Data Transfer Object for file metadata
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class FileDto {
     
     @JsonProperty("file_id")

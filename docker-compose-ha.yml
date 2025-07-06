@@ -12,6 +12,8 @@ services:
       - server-1
       - server-2
       - server-3
+    networks:
+      - filesync-network
     healthcheck:
       test: ["CMD", "nginx", "-t"]
       interval: 30s
@@ -37,6 +39,9 @@ services:
       - SPRING_RABBITMQ_USERNAME=guest
       - SPRING_RABBITMQ_PASSWORD=guest
       - SERVER_INSTANCE_ID=server-1
+    volumes:
+      - ./server/storage:/app/storage
+      - ./server/logs:/app/logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -50,6 +55,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+    networks:
+      - filesync-network
 
   # File Sync Server - Instance 2
   server-2:
@@ -70,6 +77,9 @@ services:
       - SPRING_RABBITMQ_USERNAME=guest
       - SPRING_RABBITMQ_PASSWORD=guest
       - SERVER_INSTANCE_ID=server-2
+    volumes:
+      - ./server/storage:/app/storage
+      - ./server/logs:/app/logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,6 +93,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+    networks:
+      - filesync-network
 
   # File Sync Server - Instance 3
   server-3:
@@ -103,6 +115,9 @@ services:
       - SPRING_RABBITMQ_USERNAME=guest
       - SPRING_RABBITMQ_PASSWORD=guest
       - SERVER_INSTANCE_ID=server-3
+    volumes:
+      - ./server/storage:/app/storage
+      - ./server/logs:/app/logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -116,24 +131,50 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+    networks:
+      - filesync-network
 
-  # File Sync Client
-  client:
+  # File Sync Client 1 (Device 1)
+  client1:
     build:
       context: .
       dockerfile: client/Dockerfile
-    container_name: filesync-client
+    container_name: filesync-client1
     ports:
       - "8084:8081"
     environment:
-      - SERVER_URL=http://nginx:80
+      - SERVER_URL=http://nginx:80/api
+      - CLIENT_ID=device-1
       - DISPLAY=host.docker.internal:0
     depends_on:
       nginx:
         condition: service_healthy
     volumes:
+      - ./client/sync:/app/sync
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-    network_mode: host
+    networks:
+      - filesync-network
+
+  # File Sync Client 2 (Device 2) 
+  client2:
+    build:
+      context: .
+      dockerfile: client2/Dockerfile
+    container_name: filesync-client2
+    ports:
+      - "8085:8081"
+    environment:
+      - SERVER_URL=http://nginx:80/api
+      - CLIENT_ID=device-2
+      - DISPLAY=host.docker.internal:0
+    depends_on:
+      nginx:
+        condition: service_healthy
+    volumes:
+      - ./client2/sync:/app/sync
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    networks:
+      - filesync-network
 
   # PostgreSQL with replication setup (Master)
   postgres:
@@ -162,146 +203,52 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    networks:
+      - filesync-network
 
-  # Redis Cluster Node 1
-  redis-1:
+  # Redis Cache
+  redis:
     image: redis:7-alpine
-    container_name: filesync-redis-1
+    container_name: filesync-redis
     ports:
       - "6379:6379"
     volumes:
-      - redis_1_data:/data
-    command: >
-      redis-server
-      --port 6379
-      --cluster-enabled yes
-      --cluster-config-file nodes.conf
-      --cluster-node-timeout 5000
-      --appendonly yes
+      - redis_data:/data
+    command: redis-server --appendonly yes
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 30s
       timeout: 10s
       retries: 3
+    networks:
+      - filesync-network
 
-  # Redis Cluster Node 2
-  redis-2:
-    image: redis:7-alpine
-    container_name: filesync-redis-2
-    ports:
-      - "6380:6379"
-    volumes:
-      - redis_2_data:/data
-    command: >
-      redis-server
-      --port 6379
-      --cluster-enabled yes
-      --cluster-config-file nodes.conf
-      --cluster-node-timeout 5000
-      --appendonly yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # Redis Cluster Node 3
-  redis-3:
-    image: redis:7-alpine
-    container_name: filesync-redis-3
-    ports:
-      - "6381:6379"
-    volumes:
-      - redis_3_data:/data
-    command: >
-      redis-server
-      --port 6379
-      --cluster-enabled yes
-      --cluster-config-file nodes.conf
-      --cluster-node-timeout 5000
-      --appendonly yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # RabbitMQ Cluster Node 1
-  rabbitmq-1:
+  # RabbitMQ
+  rabbitmq:
     image: rabbitmq:3-management-alpine
-    container_name: filesync-rabbitmq-1
-    hostname: rabbitmq-1
+    container_name: filesync-rabbitmq
+    hostname: rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
-      RABBITMQ_ERLANG_COOKIE: "SWQOKODSQALRPCLNMEQG"
-      RABBITMQ_USE_LONGNAME: "true"
     ports:
       - "5672:5672"
       - "15672:15672"
     volumes:
-      - rabbitmq_1_data:/var/lib/rabbitmq
+      - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 30s
       timeout: 10s
       retries: 3
-
-  # RabbitMQ Cluster Node 2
-  rabbitmq-2:
-    image: rabbitmq:3-management-alpine
-    container_name: filesync-rabbitmq-2
-    hostname: rabbitmq-2
-    environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
-      RABBITMQ_ERLANG_COOKIE: "SWQOKODSQALRPCLNMEQG"
-      RABBITMQ_USE_LONGNAME: "true"
-    ports:
-      - "5673:5672"
-      - "15673:15672"
-    volumes:
-      - rabbitmq_2_data:/var/lib/rabbitmq
-    depends_on:
-      - rabbitmq-1
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # Monitoring stack
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: filesync-prometheus
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./docker/config/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/etc/prometheus/console_libraries'
-      - '--web.console.templates=/etc/prometheus/consoles'
-
-  grafana:
-    image: grafana/grafana:latest
-    container_name: filesync-grafana
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./docker/config/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
+    networks:
+      - filesync-network
 
 volumes:
   postgres_data:
-  redis_1_data:
-  redis_2_data:
-  redis_3_data:
-  rabbitmq_1_data:
-  rabbitmq_2_data:
-  prometheus_data:
-  grafana_data:
+  redis_data:
+  rabbitmq_data:
+
+networks:
+  filesync-network:
+    driver: bridge

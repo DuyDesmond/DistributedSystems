@@ -93,6 +93,39 @@ public class ClientConfig {
         }
     }
     
+    /**
+     * Clear all configuration properties and reset to defaults
+     */
+    public void clearConfig() {
+        try {
+            // Clear the properties object
+            properties.clear();
+            
+            // Reset all fields to defaults
+            serverUrl = "http://localhost:8080/api";
+            localSyncPath = "./sync";
+            clientId = generateDefaultClientId();
+            username = null;
+            token = null;
+            refreshToken = null;
+            syncInterval = 10;
+            
+            // Create an empty configuration file
+            Path configPath = Paths.get(CONFIG_FILE);
+            if (Files.isDirectory(configPath)) {
+                logger.warn("client.properties exists as directory, removing it to create config file");
+                Files.delete(configPath);
+            }
+            
+            try (FileOutputStream fos = new FileOutputStream(CONFIG_FILE)) {
+                properties.store(fos, "File Sync Client Configuration - Cleared");
+                logger.info("Configuration cleared successfully");
+            }
+        } catch (IOException e) {
+            logger.error("Failed to clear configuration: {}", e.getMessage());
+        }
+    }
+    
     public void initializeSyncDirectory() {
         try {
             Files.createDirectories(Paths.get(localSyncPath));

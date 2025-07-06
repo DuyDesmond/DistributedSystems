@@ -127,9 +127,12 @@ public class FileWatchService {
     }
     
     private void handleFileChange(WatchEvent.Kind<?> kind, Path filePath) {
+        logger.debug("=== FILE CHANGE DETECTED: {} - {} ===", kind.name(), filePath);
+        
         // Skip temporary files and hidden files
         String fileName = filePath.getFileName().toString();
         if (fileName.startsWith(".") || fileName.endsWith(".tmp") || fileName.endsWith("~")) {
+            logger.debug("Skipping temporary/hidden file: {}", fileName);
             return;
         }
         
@@ -138,6 +141,19 @@ public class FileWatchService {
             logger.warn("File change detected but user not authenticated: {} - {}", kind.name(), filePath);
             return;
         }
+        
+        // Check if this file is in conflict resolution grace period
+        String relativePath = getRelativePath(filePath);
+        logger.debug("Checking grace period for relative path: {}", relativePath);
+        
+        if (syncService.getConflictManager() != null && 
+            syncService.getConflictManager().shouldSkipConflictCheck(relativePath)) {
+            logger.debug("Skipping file change detection for {} - in conflict resolution grace period", relativePath);
+            logger.debug("=== FILE CHANGE SKIPPED (GRACE PERIOD): {} ===", relativePath);
+            return;
+        }
+        
+        logger.debug("Processing file change for: {} ({})", relativePath, kind.name());
         
         // Queue the sync operation
         executorService.submit(() -> {
@@ -213,6 +229,19 @@ public class FileWatchService {
             
         } catch (IOException e) {
             logger.error("Error during initial scan of sync directory", e);
+        }
+    }
+    
+    /**
+     * Get relative path from the sync directory root
+     */
+    private String getRelativePath(Path filePath) {
+        try {
+            Path syncPath = Paths.get(config.getLocalSyncPath());
+            return syncPath.relativize(filePath).toString().replace("\\", "/");
+        } catch (Exception e) {
+            logger.warn("Failed to get relative path for: {}", filePath, e);
+            return filePath.toString();
         }
     }
 }
