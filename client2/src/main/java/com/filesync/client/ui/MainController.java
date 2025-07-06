@@ -199,10 +199,8 @@ public class MainController {
     
     @FXML
     private void handleLogout() {
-        config.setToken(null);
-        config.setRefreshToken(null);
-        config.setUsername(null);
-        config.saveConfig();
+        // Clear all configuration properties
+        config.clearConfig();
         
         // Clear form fields
         usernameField.clear();
@@ -210,7 +208,7 @@ public class MainController {
         emailField.clear();
         
         updateUIState();
-        appendLog("Logged out");
+        appendLog("Logged out - Configuration cleared");
     }
     
     @FXML

@@ -180,17 +180,19 @@ public class WebSocketSyncClient extends WebSocketClient {
      */
     private void sendStompConnect() {
         try {
-            String connectFrame = "CONNECT\n" +
-                                 "accept-version:1.0,1.1,1.2\n" +
-                                 "host:" + getURI().getHost() + "\n";
+            StringBuilder connectFrame = new StringBuilder();
+            connectFrame.append("CONNECT\n");
+            connectFrame.append("accept-version:1.0,1.1,1.2\n");
+            connectFrame.append("host:").append(getURI().getHost()).append("\n");
             
             if (config.getToken() != null && !config.getToken().isEmpty()) {
-                connectFrame += "Authorization:Bearer " + config.getToken() + "\n";
+                connectFrame.append("Authorization:Bearer ").append(config.getToken()).append("\n");
             }
             
-            connectFrame += "\n";
+            connectFrame.append("\n");  // Empty line separates headers from body
+            connectFrame.append('\0');  // Null terminator for STOMP protocol
             
-            send(connectFrame);
+            send(connectFrame.toString());
             logger.debug("Sent STOMP CONNECT frame");
         } catch (Exception e) {
             logger.error("Error sending STOMP CONNECT frame", e);
